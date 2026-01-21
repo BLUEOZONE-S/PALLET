@@ -194,10 +194,14 @@ const PalletOptimizer = () => {
   const runOptimization = () => {
     if (items.length === 0) return;
     
-    // Sort: Length Desc -> Weight Desc
+    // Sort: Heaviest on bottom, then largest size when weights are similar
     const sortedQueue = [...items].sort((a, b) => {
-      if (Math.abs(b.length - a.length) > 5) return b.length - a.length;
-      return b.weight - a.weight;
+      const weightDelta = b.weight - a.weight;
+      if (Math.abs(weightDelta) > 5) return weightDelta;
+      const aVolume = a.length * a.width * a.height;
+      const bVolume = b.length * b.width * b.height;
+      if (bVolume !== aVolume) return bVolume - aVolume;
+      return b.length - a.length;
     });
 
     const newPallets = [];
@@ -218,6 +222,7 @@ const PalletOptimizer = () => {
 
       let layerY = config.lumberThick; // Start on top of bottom runners
       let palletActive = true;
+      pallet.verticalZoneDepth = 0;
 
       // Add Pallet Base Runners (Foundation)
       // 3 long runners for the pallet base
@@ -231,16 +236,16 @@ const PalletOptimizer = () => {
         let rowMaxHeight = 0;
         let rowMaxLength = 0;
         let isVerticalRow = false;
-        const remainingWeight = config.maxWeight - pallet.totalWeight;
         const fillOrder = sortedQueue
           .map((item, index) => ({ item, index }))
           .filter(({ item }) => !item.isPlaced)
           .sort((a, b) => {
-            const aDelta = Math.abs(remainingWeight - a.item.weight);
-            const bDelta = Math.abs(remainingWeight - b.item.weight);
-            if (aDelta !== bDelta) return aDelta - bDelta;
-            if (a.item.length !== b.item.length) return b.item.length - a.item.length;
-            return b.item.weight - a.item.weight;
+            const weightDelta = b.item.weight - a.item.weight;
+            if (Math.abs(weightDelta) > 5) return weightDelta;
+            const aVolume = a.item.length * a.item.width * a.item.height;
+            const bVolume = b.item.length * b.item.width * b.item.height;
+            if (bVolume !== aVolume) return bVolume - aVolume;
+            return b.item.length - a.item.length;
           });
 
         // Try to fill a row
@@ -280,7 +285,9 @@ const PalletOptimizer = () => {
               itemFootprintWidth += 0.5; // Small buffer
           }
 
-          if (dims.z > effLength && !vertical) continue; 
+          const reservedDepth = pallet.verticalZoneDepth || 0;
+          const usableLength = effLength - reservedDepth;
+          if (!vertical && dims.z > usableLength) continue; 
           if (layerY + dims.y > config.maxHeight) continue;
           if (rowWidthUsed + itemFootprintWidth > effWidth) continue;
 
@@ -299,6 +306,10 @@ const PalletOptimizer = () => {
         } else {
           // PLACE ROW
           const startX = (config.palletWidth - rowWidthUsed) / 2;
+          const reservedDepth = pallet.verticalZoneDepth || 0;
+          const frontZoneStart = config.safetyGap;
+          const frontZoneEnd = config.palletLength - reservedDepth - config.safetyGap;
+          const frontZoneCenter = (frontZoneStart + frontZoneEnd) / 2;
           let currentX = startX;
 
           rowItems.forEach((ri, idx) => {
@@ -309,7 +320,9 @@ const PalletOptimizer = () => {
 
             const posX = itemX + (ri.dims.x / 2);
             const posY = layerY + (ri.dims.y / 2);
-            const posZ = config.palletLength / 2; 
+            const posZ = ri.vertical
+              ? config.palletLength - config.safetyGap - (ri.dims.z / 2)
+              : frontZoneCenter; 
 
             pallet.items.push({
               ...sortedQueue[ri.index],
@@ -323,7 +336,7 @@ const PalletOptimizer = () => {
                 const frameLen = ri.dims.z; 
                 const pocketHeight = ri.dims.y + config.lumberThick;
                 
-                const zStartGlobal = (config.palletLength - frameLen) / 2;
+                const zStartGlobal = posZ - (frameLen / 2);
                 const leftPostX = itemX - (config.lumberWidth / 2);
                 const rightPostX = itemX + ri.dims.x + (config.lumberWidth / 2);
 
@@ -374,9 +387,9 @@ const PalletOptimizer = () => {
                 
                 // 5. Longitudinal Side Rails (Top & Bottom)
                 // Left Rail
-                pallet.woodFrames.push(createLumber('rail', config.lumberWidth, config.lumberThick, frameLen, leftPostX, layerY + pocketHeight + config.lumberThick, config.palletLength/2));
+                pallet.woodFrames.push(createLumber('rail', config.lumberWidth, config.lumberThick, frameLen, leftPostX, layerY + pocketHeight + config.lumberThick, posZ));
                 // Right Rail
-                pallet.woodFrames.push(createLumber('rail', config.lumberWidth, config.lumberThick, frameLen, rightPostX, layerY + pocketHeight + config.lumberThick, config.palletLength/2));
+                pallet.woodFrames.push(createLumber('rail', config.lumberWidth, config.lumberThick, frameLen, rightPostX, layerY + pocketHeight + config.lumberThick, posZ));
             }
 
             if (!ri.vertical) {
@@ -387,6 +400,10 @@ const PalletOptimizer = () => {
           });
 
           if (isVerticalRow) {
+              pallet.verticalZoneDepth = Math.max(
+                pallet.verticalZoneDepth,
+                rowMaxLength + config.lumberWidth + config.safetyGap
+              );
               layerY += rowMaxHeight;
           } else {
               layerY += rowMaxHeight + (config.lumberThick * 2); // Space for bottom dunnage + top rung
