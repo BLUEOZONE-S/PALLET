@@ -2,7 +2,7 @@ name: Deploy GitHub Pages
 
 on:
   push:
-    branches: ["main"]   # change if your default branch is different
+    branches: ["main"]
   workflow_dispatch:
 
 permissions:
@@ -24,12 +24,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # If your site is in repo root, set path: .
-      # If your site is in /site, set path: site
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: site
+          path: .   # deploy repo root (index.html + libs)
 
       - name: Deploy to GitHub Pages
         id: deployment
