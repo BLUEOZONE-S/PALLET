@@ -221,6 +221,7 @@ const PalletOptimizer = () => {
       };
 
       let layerY = config.lumberThick; // Start on top of bottom runners
+      let maxHeightUsed = layerY;
       let palletActive = true;
       pallet.verticalZoneDepth = 0;
 
@@ -405,12 +406,13 @@ const PalletOptimizer = () => {
                 pallet.verticalZoneDepth,
                 rowMaxLength + config.lumberWidth + config.safetyGap
               );
-              layerY += rowMaxHeight;
+              maxHeightUsed = Math.max(maxHeightUsed, layerY + rowMaxHeight);
           } else {
               layerY += rowMaxHeight + (config.lumberThick * 2); // Space for bottom dunnage + top rung
+              maxHeightUsed = Math.max(maxHeightUsed, layerY);
           }
           
-          pallet.currentHeight = layerY;
+          pallet.currentHeight = maxHeightUsed;
         }
       }
 
