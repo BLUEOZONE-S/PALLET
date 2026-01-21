@@ -206,9 +206,7 @@ const PalletOptimizer = () => {
     const effWidth = config.palletWidth - (config.safetyGap * 2);
     const effLength = config.palletLength - (config.safetyGap * 2);
 
-    let currentItemIndex = 0;
-
-    while (currentItemIndex < sortedQueue.length) {
+    while (sortedQueue.length > 0) {
       const pallet = {
         id: newPallets.length + 1,
         items: [],
@@ -233,10 +231,22 @@ const PalletOptimizer = () => {
         let rowMaxHeight = 0;
         let rowMaxLength = 0;
         let isVerticalRow = false;
+        const remainingWeight = config.maxWeight - pallet.totalWeight;
+        const fillOrder = sortedQueue
+          .map((item, index) => ({ item, index }))
+          .filter(({ item }) => !item.isPlaced)
+          .sort((a, b) => {
+            const aDelta = Math.abs(remainingWeight - a.item.weight);
+            const bDelta = Math.abs(remainingWeight - b.item.weight);
+            if (aDelta !== bDelta) return aDelta - bDelta;
+            if (a.item.length !== b.item.length) return b.item.length - a.item.length;
+            return b.item.weight - a.item.weight;
+          });
 
         // Try to fill a row
-        for (let i = currentItemIndex; i < sortedQueue.length; i++) {
-          const item = sortedQueue[i];
+        for (const candidate of fillOrder) {
+          const item = candidate.item;
+          const i = candidate.index;
           if (item.isPlaced) continue;
           
           // WEIGHT CHECK
