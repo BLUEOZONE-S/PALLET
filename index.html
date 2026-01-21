@@ -350,16 +350,18 @@ const PalletOptimizer = () => {
                     // 2. Right Vertical Post
                     pallet.woodFrames.push(createLumber('post', config.lumberWidth, pocketHeight, config.lumberWidth, rightPostX, layerY + pocketHeight/2, zPos));
                 
-                    // 3. Top Cross Beam (Rung) - Only at cradle points
-                    const rungWidth = (rightPostX - leftPostX) + config.lumberWidth;
-                    pallet.woodFrames.push(createLumber('rung', 
-                        rungWidth, 
-                        config.lumberThick, 
-                        config.lumberWidth, 
-                        (leftPostX + rightPostX) / 2, 
-                        layerY + pocketHeight, 
-                        zPos
-                    ));
+                const baseHorizontalY = layerY + (config.lumberThick / 2);
+
+                // 3. Base Cross Beam (Rung) - Starts on pallet
+                const rungWidth = (rightPostX - leftPostX) + config.lumberWidth;
+                pallet.woodFrames.push(createLumber('rung', 
+                    rungWidth, 
+                    config.lumberThick, 
+                    config.lumberWidth, 
+                    (leftPostX + rightPostX) / 2, 
+                    baseHorizontalY, 
+                    zPos
+                ));
 
                     // 4. Diagonal Bracing (Optional)
                     if (config.addBracing && z + config.framingSpacing <= frameLen) {
@@ -385,11 +387,11 @@ const PalletOptimizer = () => {
                     }
                 }
                 
-                // 5. Longitudinal Side Rails (Top & Bottom)
+                // 5. Longitudinal Side Rails (Base)
                 // Left Rail
-                pallet.woodFrames.push(createLumber('rail', config.lumberWidth, config.lumberThick, frameLen, leftPostX, layerY + pocketHeight + config.lumberThick, posZ));
+                pallet.woodFrames.push(createLumber('rail', config.lumberWidth, config.lumberThick, frameLen, leftPostX, baseHorizontalY, posZ));
                 // Right Rail
-                pallet.woodFrames.push(createLumber('rail', config.lumberWidth, config.lumberThick, frameLen, rightPostX, layerY + pocketHeight + config.lumberThick, posZ));
+                pallet.woodFrames.push(createLumber('rail', config.lumberWidth, config.lumberThick, frameLen, rightPostX, baseHorizontalY, posZ));
             }
 
             if (!ri.vertical) {
