@@ -335,6 +335,7 @@ const PalletOptimizer = () => {
             if (!ri.vertical) {
                 const frameLen = ri.dims.z; 
                 const pocketHeight = ri.dims.y + config.lumberThick;
+                const baseHorizontalY = layerY + (config.lumberThick / 2);
                 
                 const zStartGlobal = posZ - (frameLen / 2);
                 const leftPostX = itemX - (config.lumberWidth / 2);
@@ -350,8 +351,6 @@ const PalletOptimizer = () => {
                     // 2. Right Vertical Post
                     pallet.woodFrames.push(createLumber('post', config.lumberWidth, pocketHeight, config.lumberWidth, rightPostX, layerY + pocketHeight/2, zPos));
                 
-                const baseHorizontalY = layerY + (config.lumberThick / 2);
-
                 // 3. Base Cross Beam (Rung) - Starts on pallet
                 const rungWidth = (rightPostX - leftPostX) + config.lumberWidth;
                 pallet.woodFrames.push(createLumber('rung', 
