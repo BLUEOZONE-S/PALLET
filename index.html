@@ -336,7 +336,7 @@ const PalletOptimizer = () => {
             if (!ri.vertical) {
                 const frameLen = ri.dims.z; 
                 const pocketHeight = ri.dims.y + config.lumberThick;
-                const baseHorizontalY = layerY + (config.lumberThick / 2);
+                const baseHorizontalY = layerY - (config.lumberThick / 2);
                 
                 const zStartGlobal = posZ - (frameLen / 2);
                 const leftPostX = itemX - (config.lumberWidth / 2);
@@ -347,10 +347,10 @@ const PalletOptimizer = () => {
                     const zPos = zStartGlobal + z;
                     
                     // 1. Left Vertical Post
-                    pallet.woodFrames.push(createLumber('post', config.lumberWidth, pocketHeight, config.lumberWidth, leftPostX, layerY + pocketHeight/2, zPos));
+                    pallet.woodFrames.push(createLumber('post', config.lumberWidth, pocketHeight, config.lumberWidth, leftPostX, baseHorizontalY + pocketHeight/2, zPos));
                     
                     // 2. Right Vertical Post
-                    pallet.woodFrames.push(createLumber('post', config.lumberWidth, pocketHeight, config.lumberWidth, rightPostX, layerY + pocketHeight/2, zPos));
+                    pallet.woodFrames.push(createLumber('post', config.lumberWidth, pocketHeight, config.lumberWidth, rightPostX, baseHorizontalY + pocketHeight/2, zPos));
                 
                 // 3. Base Cross Beam (Rung) - Starts on pallet
                 const rungWidth = (rightPostX - leftPostX) + config.lumberWidth;
@@ -371,8 +371,8 @@ const PalletOptimizer = () => {
                          pallet.woodFrames.push({
                             type: 'diagonal',
                             isDiagonal: true,
-                            start: { x: leftPostX, y: layerY, z: zPos },
-                            end: { x: leftPostX, y: layerY + pocketHeight, z: nextZ },
+                            start: { x: leftPostX, y: baseHorizontalY, z: zPos },
+                            end: { x: leftPostX, y: baseHorizontalY + pocketHeight, z: nextZ },
                             dims: { x: config.lumberWidth, y: config.lumberThick } 
                          });
 
@@ -380,8 +380,8 @@ const PalletOptimizer = () => {
                          pallet.woodFrames.push({
                             type: 'diagonal',
                             isDiagonal: true,
-                            start: { x: rightPostX, y: layerY, z: zPos },
-                            end: { x: rightPostX, y: layerY + pocketHeight, z: nextZ },
+                            start: { x: rightPostX, y: baseHorizontalY, z: zPos },
+                            end: { x: rightPostX, y: baseHorizontalY + pocketHeight, z: nextZ },
                             dims: { x: config.lumberWidth, y: config.lumberThick } 
                          });
                     }
