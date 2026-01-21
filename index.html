@@ -78,6 +78,7 @@
         const Scale = (p) => <IconWrapper name="scale" {...p} />;
         const Hammer = (p) => <IconWrapper name="hammer" {...p} />;
         const Settings = (p) => <IconWrapper name="settings" {...p} />;
+        const RefreshCw = (p) => <IconWrapper name="refresh-cw" {...p} />;
 
         // --- APP CODE ---
         
@@ -91,6 +92,8 @@ const PalletOptimizer = () => {
   const [pallets, setPallets] = useState([]);
   const [errors, setErrors] = useState([]);
   const [currentPalletView, setCurrentPalletView] = useState(0);
+  const [lastRunConfig, setLastRunConfig] = useState(null);
+  const [isConfigDirty, setIsConfigDirty] = useState(false);
   
   // Configuration
   const [config, setConfig] = useState({
@@ -193,6 +196,8 @@ const PalletOptimizer = () => {
 
   const runOptimization = () => {
     if (items.length === 0) return;
+    setLastRunConfig({ ...config });
+    setIsConfigDirty(false);
     
     // Sort: Heaviest on bottom, then largest size when weights are similar
     const sortedQueue = [...items].sort((a, b) => {
@@ -450,6 +455,12 @@ const PalletOptimizer = () => {
     if(newPallets.length > 0) setCurrentPalletView(0);
   };
 
+  useEffect(() => {
+    if (!lastRunConfig) return;
+    const configChanged = JSON.stringify(config) !== JSON.stringify(lastRunConfig);
+    setIsConfigDirty(configChanged);
+  }, [config, lastRunConfig]);
+
   // -------------------------------------------------------------------------
   // 4. THREE.JS RENDERING
   // -------------------------------------------------------------------------
@@ -594,6 +605,11 @@ const PalletOptimizer = () => {
             <button onClick={runOptimization} disabled={items.length===0} className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-md shadow-sm transition-colors disabled:opacity-50">
                 <Play size={16} /> Build Crate
             </button>
+            {isConfigDirty && (
+              <button onClick={runOptimization} disabled={items.length===0} className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-amber-900 bg-amber-200 hover:bg-amber-300 rounded-md border border-amber-300 shadow-sm transition-colors disabled:opacity-50">
+                  <RefreshCw size={16} /> Refresh Preview
+              </button>
+            )}
         </div>
       </header>
 
@@ -647,7 +663,7 @@ const PalletOptimizer = () => {
                         <option value="false">No - Vertical Posts Only</option>
                     </select>
                 </div>
-                 <div>
+                <div>
                     <label className="text-xs font-medium text-gray-600 flex items-center gap-1">Vertical Stacking</label>
                     <select 
                         value={config.allowVertical} 
@@ -658,6 +674,11 @@ const PalletOptimizer = () => {
                         <option value="false">No - Always Lay Flat</option>
                     </select>
                 </div>
+                {isConfigDirty && (
+                  <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-900">
+                    Config changed. Click Refresh Preview to recalculate the stack.
+                  </div>
+                )}
             </div>
 
             {/* UPLOAD */}
