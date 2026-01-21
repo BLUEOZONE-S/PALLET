@@ -199,8 +199,10 @@ const PalletOptimizer = () => {
     setLastRunConfig({ ...config });
     setIsConfigDirty(false);
     
+    const workingItems = items.map((item) => ({ ...item, isPlaced: false }));
+
     // Sort: Heaviest on bottom, then largest size when weights are similar
-    const sortedQueue = [...items].sort((a, b) => {
+    const sortedQueue = [...workingItems].sort((a, b) => {
       const weightDelta = b.weight - a.weight;
       if (Math.abs(weightDelta) > 5) return weightDelta;
       const aVolume = a.length * a.width * a.height;
