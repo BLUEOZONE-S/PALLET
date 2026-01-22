@@ -202,6 +202,40 @@ const PalletOptimizer = () => {
       pos: { x: posX, y: posY, z: posZ }
   });
 
+  const toFrameKey = (frame) => {
+    const round = (value) => Number(value).toFixed(3);
+    if (frame.isDiagonal) {
+      return [
+        'diag',
+        round(frame.start.x),
+        round(frame.start.y),
+        round(frame.start.z),
+        round(frame.end.x),
+        round(frame.end.y),
+        round(frame.end.z),
+        round(frame.dims.x),
+        round(frame.dims.y)
+      ].join('|');
+    }
+
+    return [
+      frame.type,
+      round(frame.pos.x),
+      round(frame.pos.y),
+      round(frame.pos.z),
+      round(frame.dims.x),
+      round(frame.dims.y),
+      round(frame.dims.z)
+    ].join('|');
+  };
+
+  const addWoodFrame = (pallet, frame, registry) => {
+    const key = toFrameKey(frame);
+    if (registry.has(key)) return;
+    registry.add(key);
+    pallet.woodFrames.push(frame);
+  };
+
   // -------------------------------------------------------------------------
   // 3. OPTIMIZATION ALGORITHM
   // -------------------------------------------------------------------------
@@ -259,6 +293,7 @@ const PalletOptimizer = () => {
         currentHeight: 0,
         woodUsage: 0
       };
+      const frameRegistry = new Set();
 
       // Current vertical placement height and layer tracking
       let layerY = config.lumberThick; // Start on top of bottom runners
@@ -269,7 +304,19 @@ const PalletOptimizer = () => {
       // Add Pallet Base Runners (Foundation)
       // 3 long runners for the pallet base
       [0.2, 0.5, 0.8].forEach(factor => {
-           pallet.woodFrames.push(createLumber('base-runner', config.lumberWidth, config.lumberThick, config.palletLength, config.palletWidth * factor, config.lumberThick/2, config.palletLength/2));
+           addWoodFrame(
+             pallet,
+             createLumber(
+               'base-runner',
+               config.lumberWidth,
+               config.lumberThick,
+               config.palletLength,
+               config.palletWidth * factor,
+               config.lumberThick / 2,
+               config.palletLength / 2
+             ),
+             frameRegistry
+           );
       });
 
       while (palletActive) {
@@ -389,51 +436,112 @@ const PalletOptimizer = () => {
                     const zPos = zStartGlobal + z;
                     
                     // 1. Left Vertical Post
-                    pallet.woodFrames.push(createLumber('post', config.lumberWidth, pocketHeight, config.lumberWidth, leftPostX, baseHorizontalY + pocketHeight/2, zPos));
+                    addWoodFrame(
+                      pallet,
+                      createLumber(
+                        'post',
+                        config.lumberWidth,
+                        pocketHeight,
+                        config.lumberWidth,
+                        leftPostX,
+                        baseHorizontalY + pocketHeight / 2,
+                        zPos
+                      ),
+                      frameRegistry
+                    );
                     
                     // 2. Right Vertical Post
-                    pallet.woodFrames.push(createLumber('post', config.lumberWidth, pocketHeight, config.lumberWidth, rightPostX, baseHorizontalY + pocketHeight/2, zPos));
+                    addWoodFrame(
+                      pallet,
+                      createLumber(
+                        'post',
+                        config.lumberWidth,
+                        pocketHeight,
+                        config.lumberWidth,
+                        rightPostX,
+                        baseHorizontalY + pocketHeight / 2,
+                        zPos
+                      ),
+                      frameRegistry
+                    );
                 
                 // 3. Base Cross Beam (Rung) - Starts on pallet
                 const rungWidth = (rightPostX - leftPostX) + config.lumberWidth;
-                pallet.woodFrames.push(createLumber('rung', 
-                    rungWidth, 
-                    config.lumberThick, 
-                    config.lumberWidth, 
-                    (leftPostX + rightPostX) / 2, 
-                    baseHorizontalY, 
+                addWoodFrame(
+                  pallet,
+                  createLumber(
+                    'rung',
+                    rungWidth,
+                    config.lumberThick,
+                    config.lumberWidth,
+                    (leftPostX + rightPostX) / 2,
+                    baseHorizontalY,
                     zPos
-                ));
+                  ),
+                  frameRegistry
+                );
 
                     // 4. Diagonal Bracing (Optional)
                     if (config.addBracing && z + config.framingSpacing <= frameLen) {
                          const nextZ = zStartGlobal + z + config.framingSpacing;
                          
                          // Left Wall Diagonal
-                         pallet.woodFrames.push({
-                            type: 'diagonal',
-                            isDiagonal: true,
-                            start: { x: leftPostX, y: baseHorizontalY, z: zPos },
-                            end: { x: leftPostX, y: baseHorizontalY + pocketHeight, z: nextZ },
-                            dims: { x: config.lumberWidth, y: config.lumberThick } 
-                         });
+                         addWoodFrame(
+                           pallet,
+                           {
+                             type: 'diagonal',
+                             isDiagonal: true,
+                             start: { x: leftPostX, y: baseHorizontalY, z: zPos },
+                             end: { x: leftPostX, y: baseHorizontalY + pocketHeight, z: nextZ },
+                             dims: { x: config.lumberWidth, y: config.lumberThick } 
+                           },
+                           frameRegistry
+                         );
 
                          // Right Wall Diagonal
-                         pallet.woodFrames.push({
-                            type: 'diagonal',
-                            isDiagonal: true,
-                            start: { x: rightPostX, y: baseHorizontalY, z: zPos },
-                            end: { x: rightPostX, y: baseHorizontalY + pocketHeight, z: nextZ },
-                            dims: { x: config.lumberWidth, y: config.lumberThick } 
-                         });
+                         addWoodFrame(
+                           pallet,
+                           {
+                             type: 'diagonal',
+                             isDiagonal: true,
+                             start: { x: rightPostX, y: baseHorizontalY, z: zPos },
+                             end: { x: rightPostX, y: baseHorizontalY + pocketHeight, z: nextZ },
+                             dims: { x: config.lumberWidth, y: config.lumberThick } 
+                           },
+                           frameRegistry
+                         );
                     }
                 }
                 
                 // 5. Longitudinal Side Rails (Base)
                 // Left Rail
-                pallet.woodFrames.push(createLumber('rail', config.lumberWidth, config.lumberThick, frameLen, leftPostX, baseHorizontalY, posZ));
+                addWoodFrame(
+                  pallet,
+                  createLumber(
+                    'rail',
+                    config.lumberWidth,
+                    config.lumberThick,
+                    frameLen,
+                    leftPostX,
+                    baseHorizontalY,
+                    posZ
+                  ),
+                  frameRegistry
+                );
                 // Right Rail
-                pallet.woodFrames.push(createLumber('rail', config.lumberWidth, config.lumberThick, frameLen, rightPostX, baseHorizontalY, posZ));
+                addWoodFrame(
+                  pallet,
+                  createLumber(
+                    'rail',
+                    config.lumberWidth,
+                    config.lumberThick,
+                    frameLen,
+                    rightPostX,
+                    baseHorizontalY,
+                    posZ
+                  ),
+                  frameRegistry
+                );
             }
 
             if (!ri.vertical) {
