@@ -52,7 +52,7 @@
         // --- SHIMS AND POLYFILLS ---
 
         // 1. React Globals
-        const { useState, useEffect, useRef } = React;
+        const { useState, useEffect, useRef, useCallback } = React;
         
         // 2. Lucide Icon Shim
         // This maps the React component usage <Hammer /> to vanilla lucide icons
@@ -115,8 +115,14 @@ const PalletOptimizer = () => {
   const [renderProxyBoxes, setRenderProxyBoxes] = useState(false);
   const [showPlacementBoxes, setShowPlacementBoxes] = useState(true);
   const [showVoxelDebug, setShowVoxelDebug] = useState(false);
-  const [normalizeStlToBOM, setNormalizeStlToBOM] = useState(true);
+  const [showStlBounds, setShowStlBounds] = useState(true);
+  const [showDeadzoneBox, setShowDeadzoneBox] = useState(true);
+  const [normalizeStlToBOM, setNormalizeStlToBOM] = useState(false);
+  const [debugLogs, setDebugLogs] = useState([]);
+  const [sidebarTab, setSidebarTab] = useState('controls');
   const stlFilesAvailable = Object.keys(stlFiles).length > 0;
+  const debugLogLimit = 200;
+  const lastMissingKeyRef = useRef('');
   
   // User-controlled configuration for pallet constraints and framing
   const [config, setConfig] = useState({
@@ -163,7 +169,7 @@ const PalletOptimizer = () => {
     const lines = text.split(/\r?\n/).filter(line => line.trim().length > 0);
     if (lines.length === 0) throw new Error('Empty CSV.');
     const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
-    const required = ['number', 'h', 'w', 'l', 'weight', 'qty'];
+    const required = ['number', 'weight', 'qty'];
     const headerMap = {};
     headers.forEach((h, idx) => { headerMap[h] = idx; });
     const missingHeaders = required.filter(key => headerMap[key] === undefined);
@@ -178,15 +184,36 @@ const PalletOptimizer = () => {
       if (!itemNumber) continue;
       const item = {
         itemNumber,
-        height: parseFloat(row[headerMap.h]),
-        width: parseFloat(row[headerMap.w]),
-        length: parseFloat(row[headerMap.l]),
+        height: headerMap.h !== undefined ? parseFloat(row[headerMap.h]) : NaN,
+        width: headerMap.w !== undefined ? parseFloat(row[headerMap.w]) : NaN,
+        length: headerMap.l !== undefined ? parseFloat(row[headerMap.l]) : NaN,
         weight: parseFloat(row[headerMap.weight]),
         qty: parseFloat(row[headerMap.qty]) || 1
       };
-      if (!isNaN(item.height) && !isNaN(item.weight)) parsedItems.push(item);
+      if (!isNaN(item.weight)) parsedItems.push(item);
     }
     return parsedItems;
+  };
+
+  const addDebugLog = useCallback((message, level = 'info') => {
+    setDebugLogs(prev => {
+      const entry = {
+        id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        message,
+        level,
+        timestamp: new Date().toLocaleTimeString()
+      };
+      const next = [...prev, entry];
+      if (next.length > debugLogLimit) {
+        return next.slice(next.length - debugLogLimit);
+      }
+      return next;
+    });
+  }, []);
+
+  const reportErrors = (messages) => {
+    setErrors(messages);
+    messages.forEach(message => addDebugLog(message, 'error'));
   };
 
   const handleFileUpload = (e) => {
@@ -199,7 +226,8 @@ const PalletOptimizer = () => {
         const parsedItems = parseBOM(text);
         processItems(parsedItems);
       } catch (err) {
-        setErrors([err.message || 'Failed to parse CSV.']);
+        const message = err.message || 'Failed to parse CSV.';
+        reportErrors([message]);
       }
     };
     reader.readAsText(file);
@@ -226,6 +254,7 @@ const PalletOptimizer = () => {
     setItems(expanded);
     setPallets([]);
     setErrors([]);
+    addDebugLog(`Loaded ${rawItems.length} BOM rows.`, 'info');
   };
 
   // -------------------------------------------------------------------------
@@ -240,6 +269,7 @@ const PalletOptimizer = () => {
       if (baseName) nextMap[baseName] = file;
     });
     setStlFiles(prev => ({ ...prev, ...nextMap }));
+    addDebugLog(`STL folder selected. ${Object.keys(nextMap).length} STL file(s) indexed.`, 'info');
   };
 
   const createVoxelGrid = (nx, ny, nz, voxelSize, data) => {
@@ -547,6 +577,29 @@ const PalletOptimizer = () => {
     return createVoxelGrid(nx, ny, nz, voxelSize);
   };
 
+  const autoOrientGeometry = (geometry) => {
+    geometry.computeBoundingBox();
+    const size = new THREE.Vector3();
+    geometry.boundingBox.getSize(size);
+    const dims = { x: size.x, y: size.y, z: size.z };
+    const largestAxis = Object.entries(dims).sort((a, b) => b[1] - a[1])[0][0];
+    let applied = [];
+    if (largestAxis === 'x') {
+      geometry.rotateY(Math.PI / 2);
+      applied.push('rotateY(90°)');
+    } else if (largestAxis === 'y') {
+      geometry.rotateX(-Math.PI / 2);
+      applied.push('rotateX(-90°)');
+    }
+    geometry.computeBoundingBox();
+    geometry.boundingBox.getSize(size);
+    if (size.x < size.y) {
+      geometry.rotateZ(Math.PI / 2);
+      applied.push('rotateZ(90°)');
+    }
+    return applied;
+  };
+
   const loadStlFile = (file, stlKey) => new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
@@ -555,6 +608,7 @@ const PalletOptimizer = () => {
         const geometry = loader.parse(reader.result);
         const scale = stlUnits === 'mm' ? 1 / 25.4 : 1;
         geometry.scale(scale, scale, scale);
+        const applied = autoOrientGeometry(geometry);
         geometry.computeBoundingBox();
         const bbox = geometry.boundingBox;
         const center = new THREE.Vector3();
@@ -568,6 +622,9 @@ const PalletOptimizer = () => {
           z: centeredBox.max.z - centeredBox.min.z
         };
         const voxelGrid = voxelizeMesh(geometry, voxelSize);
+        if (applied.length > 0) {
+          addDebugLog(`Auto-oriented STL "${stlKey}" with ${applied.join(', ')}.`, 'info');
+        }
         resolve({ stlKey, geometry, dims, voxelGrid });
       } catch (err) {
         reject(err);
@@ -634,10 +691,19 @@ const PalletOptimizer = () => {
           if (!isCancelled) {
             setStlLoadStatus(prev => ({ ...prev, loaded: loadedCount }));
           }
+          if (!isCancelled) {
+            addDebugLog(
+              `Loaded STL "${key}" (${result.dims.x.toFixed(2)} x ${result.dims.y.toFixed(2)} x ${result.dims.z.toFixed(2)} in).`,
+              'info'
+            );
+          }
         } catch (err) {
           missing.push(key);
           if (!isCancelled) {
             setStlLoadStatus(prev => ({ ...prev, missing: Array.from(new Set(missing)) }));
+          }
+          if (!isCancelled) {
+            addDebugLog(`Failed to load STL "${key}": ${err.message || err}`, 'error');
           }
         }
       }
@@ -654,7 +720,7 @@ const PalletOptimizer = () => {
     };
     loadAll();
     return () => { isCancelled = true; };
-  }, [bomItems, stlFiles, stlUnits]);
+  }, [bomItems, stlFiles, stlUnits, loadedMeshes, addDebugLog]);
 
   useEffect(() => {
     if (bomItems.length === 0) return;
@@ -663,6 +729,24 @@ const PalletOptimizer = () => {
       stlFound: Boolean(stlFiles[item.stlKey])
     })));
   }, [stlFiles]);
+
+  useEffect(() => {
+    if (normalizeStlToBOM && Object.keys(loadedMeshes).length > 0) {
+      setNormalizeStlToBOM(false);
+      addDebugLog('CSV dimension override disabled because STL geometry is available.', 'warn');
+    }
+  }, [normalizeStlToBOM, loadedMeshes, addDebugLog]);
+
+  useEffect(() => {
+    const missingKey = stlLoadStatus.missing.join('|');
+    if (missingKey === lastMissingKeyRef.current) return;
+    lastMissingKeyRef.current = missingKey;
+    if (stlLoadStatus.missing.length > 0) {
+      addDebugLog(`Missing STL(s): ${stlLoadStatus.missing.join(', ')}`, 'warn');
+    } else if (stlLoadStatus.total > 0 && stlLoadStatus.loaded === stlLoadStatus.total) {
+      addDebugLog('All required STL files loaded.', 'info');
+    }
+  }, [stlLoadStatus, addDebugLog]);
 
   // -------------------------------------------------------------------------
   // 2. FRAMING GENERATOR (The Wood Structure)
@@ -729,6 +813,73 @@ const PalletOptimizer = () => {
     return { dims, vertical };
   };
 
+  const hasValidDims = (dims) => (
+    Number.isFinite(dims.x) &&
+    Number.isFinite(dims.y) &&
+    Number.isFinite(dims.z) &&
+    dims.x > 0 &&
+    dims.y > 0 &&
+    dims.z > 0
+  );
+
+  const computeDeadzoneBox = (pallet) => {
+    if (!pallet.items.length) return null;
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    let minZ = Infinity;
+    let maxZ = -Infinity;
+    pallet.items.forEach(item => {
+      const dims = item.finalDims;
+      minX = Math.min(minX, item.position.x - dims.x / 2);
+      maxX = Math.max(maxX, item.position.x + dims.x / 2);
+      minY = Math.min(minY, item.position.y - dims.y / 2);
+      maxY = Math.max(maxY, item.position.y + dims.y / 2);
+      minZ = Math.min(minZ, item.position.z - dims.z / 2);
+      maxZ = Math.max(maxZ, item.position.z + dims.z / 2);
+    });
+
+    const bounds = {
+      minX: config.safetyGap,
+      maxX: config.palletWidth - config.safetyGap,
+      minY: 0,
+      maxY: config.maxHeight,
+      minZ: config.safetyGap,
+      maxZ: config.palletLength - config.safetyGap
+    };
+
+    const candidates = [];
+    const addCandidate = (label, cminX, cmaxX, cminY, cmaxY, cminZ, cmaxZ) => {
+      const dims = {
+        x: Math.max(0, cmaxX - cminX),
+        y: Math.max(0, cmaxY - cminY),
+        z: Math.max(0, cmaxZ - cminZ)
+      };
+      if (dims.x <= 0 || dims.y <= 0 || dims.z <= 0) return;
+      candidates.push({
+        label,
+        dims,
+        pos: {
+          x: cminX + dims.x / 2,
+          y: cminY + dims.y / 2,
+          z: cminZ + dims.z / 2
+        },
+        volume: dims.x * dims.y * dims.z
+      });
+    };
+
+    addCandidate('left', bounds.minX, Math.min(minX, bounds.maxX), bounds.minY, bounds.maxY, bounds.minZ, bounds.maxZ);
+    addCandidate('right', Math.max(maxX, bounds.minX), bounds.maxX, bounds.minY, bounds.maxY, bounds.minZ, bounds.maxZ);
+    addCandidate('front', bounds.minX, bounds.maxX, bounds.minY, bounds.maxY, bounds.minZ, Math.min(minZ, bounds.maxZ));
+    addCandidate('back', bounds.minX, bounds.maxX, bounds.minY, bounds.maxY, Math.max(maxZ, bounds.minZ), bounds.maxZ);
+    addCandidate('top', bounds.minX, bounds.maxX, Math.max(maxY, bounds.minY), bounds.maxY, bounds.minZ, bounds.maxZ);
+
+    if (candidates.length === 0) return null;
+    candidates.sort((a, b) => b.volume - a.volume);
+    return candidates[0];
+  };
+
   // Run the crate build and placement algorithm
   const runOptimization = () => {
     if (items.length === 0) return;
@@ -736,6 +887,13 @@ const PalletOptimizer = () => {
     setIsConfigDirty(false);
     
     const workingItems = items.map((item) => ({ ...item, isPlaced: false }));
+    const invalidItems = workingItems.filter(item => !hasValidDims(getItemDims(item)));
+    if (invalidItems.length > 0) {
+      reportErrors([
+        `Missing dimensions for ${invalidItems.map(item => item.itemNumber).join(', ')}. Add CSV dims or provide STL files.`
+      ]);
+      return;
+    }
 
     // Sort: Longer horizontal parts first (bottom layers), then heavier items
     const sortedQueue = [...workingItems].sort((a, b) => {
@@ -898,7 +1056,7 @@ const PalletOptimizer = () => {
             const voxelGrid = getItemVoxelGrid(ri, rotationYDegrees, ri.vertical);
             const fits = testVoxelFit(voxelGrid, pallet.voxelGrid, { x: posX, y: posY, z: posZ }, ri.dims);
             if (!fits) {
-              setErrors([`No placement possible for ${ri.itemNumber}. Check STL collision or pallet limits.`]);
+              reportErrors([`No placement possible for ${ri.itemNumber}. Check STL collision or pallet limits.`]);
               placementFailed = true;
               break;
             }
@@ -1076,7 +1234,7 @@ const PalletOptimizer = () => {
       // Validate if at least one item could be placed
       const remaining = sortedQueue.filter(i => !i.isPlaced);
       if (remaining.length === sortedQueue.length) {
-        setErrors(["Item fits failed. Check max dimensions."]);
+        reportErrors(["Item fits failed. Check max dimensions."]);
         break;
       }
 
@@ -1084,6 +1242,10 @@ const PalletOptimizer = () => {
       let nextQueue = [];
       for(let i=0; i<sortedQueue.length; i++) {
         if(!sortedQueue[i].isPlaced) nextQueue.push(sortedQueue[i]);
+      }
+      pallet.deadzoneBox = computeDeadzoneBox(pallet);
+      if (pallet.deadzoneBox) {
+        addDebugLog(`Deadzone box computed (${pallet.deadzoneBox.label}) with volume ${pallet.deadzoneBox.volume.toFixed(1)} in³.`, 'info');
       }
       sortedQueue.length = 0;
       sortedQueue.push(...nextQueue);
@@ -1176,6 +1338,15 @@ const PalletOptimizer = () => {
         scene.add(stlMesh);
       }
 
+      if (showStlBounds) {
+        const boundsGeo = new THREE.BoxGeometry(dims.x, dims.y, dims.z);
+        const boundsEdges = new THREE.EdgesGeometry(boundsGeo);
+        const boundsMat = new THREE.LineBasicMaterial({ color: 0x111827, opacity: 0.5, transparent: true });
+        const boundsLine = new THREE.LineSegments(boundsEdges, boundsMat);
+        boundsLine.position.set(item.position.x, item.position.y, item.position.z);
+        scene.add(boundsLine);
+      }
+
       if (shouldRenderBox) {
         const geo = new THREE.BoxGeometry(dims.x, dims.y, dims.z);
         const mat = new THREE.MeshStandardMaterial({
@@ -1229,6 +1400,19 @@ const PalletOptimizer = () => {
         scene.add(instanced);
       }
     });
+
+    if (showDeadzoneBox && pallet.deadzoneBox) {
+      const dz = pallet.deadzoneBox;
+      const dzGeo = new THREE.BoxGeometry(dz.dims.x, dz.dims.y, dz.dims.z);
+      const dzMat = new THREE.MeshBasicMaterial({ color: 0xa855f7, transparent: true, opacity: 0.08 });
+      const dzMesh = new THREE.Mesh(dzGeo, dzMat);
+      dzMesh.position.set(dz.pos.x, dz.pos.y, dz.pos.z);
+      scene.add(dzMesh);
+      const dzEdges = new THREE.EdgesGeometry(dzGeo);
+      const dzLine = new THREE.LineSegments(dzEdges, new THREE.LineBasicMaterial({ color: 0x7e22ce, opacity: 0.5, transparent: true }));
+      dzLine.position.copy(dzMesh.position);
+      scene.add(dzLine);
+    }
 
     // Render Wood Framing
     const woodMat = new THREE.MeshStandardMaterial({ color: 0xEECFA1, roughness: 0.9 });
@@ -1296,7 +1480,18 @@ const PalletOptimizer = () => {
         window.removeEventListener('mouseup', onMouseUp);
         window.removeEventListener('mousemove', onMouseMove);
     };
-  }, [pallets, currentPalletView, config, loadedMeshes, renderStlMeshes, renderProxyBoxes, showPlacementBoxes, showVoxelDebug]);
+  }, [
+    pallets,
+    currentPalletView,
+    config,
+    loadedMeshes,
+    renderStlMeshes,
+    renderProxyBoxes,
+    showPlacementBoxes,
+    showVoxelDebug,
+    showStlBounds,
+    showDeadzoneBox
+  ]);
 
   return (
     <div className="flex flex-col h-screen bg-gray-50 text-gray-800 font-sans">
@@ -1324,7 +1519,23 @@ const PalletOptimizer = () => {
       </header>
 
       <main className="flex-1 flex overflow-hidden">
-        <div className="w-80 bg-white border-r flex flex-col overflow-y-auto">
+        <div className="w-80 bg-white border-r flex flex-col">
+            <div className="p-2 border-b bg-gray-50 flex gap-2 text-xs font-semibold">
+                <button
+                  onClick={() => setSidebarTab('controls')}
+                  className={`flex-1 px-3 py-1 rounded ${sidebarTab === 'controls' ? 'bg-white border text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                >
+                  Controls
+                </button>
+                <button
+                  onClick={() => setSidebarTab('terminal')}
+                  className={`flex-1 px-3 py-1 rounded ${sidebarTab === 'terminal' ? 'bg-white border text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                >
+                  Terminal
+                </button>
+            </div>
+            {sidebarTab === 'controls' ? (
+            <div className="flex-1 flex flex-col overflow-y-auto">
             {/* CONFIG */}
             <div className="p-4 border-b space-y-4">
                 <h2 className="text-xs font-bold text-gray-400 uppercase tracking-wider flex items-center gap-2"><Settings size={12}/> Pallet Configuration</h2>
@@ -1419,7 +1630,7 @@ const PalletOptimizer = () => {
                 <label className="flex flex-col items-center justify-center w-full h-20 border-2 border-gray-300 border-dashed rounded-lg cursor-pointer bg-white hover:bg-gray-50 transition-colors">
                     <div className="flex flex-col items-center justify-center pt-2 pb-2">
                         <Upload size={20} className="text-gray-400 mb-1" />
-                        <p className="text-[10px] text-gray-500">Upload CSV (number, H, W, L, Weight, QTY)</p>
+                        <p className="text-[10px] text-gray-500">Upload CSV (number, weight, qty; H/W/L optional if STL provided)</p>
                     </div>
                     <input type="file" className="hidden" accept=".csv" onChange={handleFileUpload} />
                 </label>
@@ -1464,7 +1675,7 @@ const PalletOptimizer = () => {
                     checked={normalizeStlToBOM}
                     onChange={e => setNormalizeStlToBOM(e.target.checked)}
                   />
-                  <span>Fit STL geometry to BOM dimensions for placement/rendering.</span>
+                  <span>Override STL dimensions with CSV values (debug only).</span>
                 </label>
             </div>
 
@@ -1480,8 +1691,16 @@ const PalletOptimizer = () => {
                   Render proxy boxes only
                 </label>
                 <label className="flex items-center gap-2 text-xs text-gray-600">
+                  <input type="checkbox" checked={showStlBounds} onChange={e => setShowStlBounds(e.target.checked)} />
+                  Show STL bounding boxes
+                </label>
+                <label className="flex items-center gap-2 text-xs text-gray-600">
                   <input type="checkbox" checked={showPlacementBoxes} onChange={e => setShowPlacementBoxes(e.target.checked)} />
                   Show placement boxes
+                </label>
+                <label className="flex items-center gap-2 text-xs text-gray-600">
+                  <input type="checkbox" checked={showDeadzoneBox} onChange={e => setShowDeadzoneBox(e.target.checked)} />
+                  Show deadzone box (largest open volume)
                 </label>
                 <label className="flex items-center gap-2 text-xs text-gray-600">
                   <input type="checkbox" checked={showVoxelDebug} onChange={e => setShowVoxelDebug(e.target.checked)} />
@@ -1514,6 +1733,40 @@ const PalletOptimizer = () => {
                     })}
                 </div>
             </div>
+            </div>
+            ) : (
+            <div className="flex-1 flex flex-col bg-slate-900 text-slate-100">
+                <div className="p-3 border-b border-slate-800 flex items-center justify-between">
+                    <div className="text-xs font-bold uppercase tracking-wider text-slate-300">Debug Terminal</div>
+                    <button
+                      onClick={() => setDebugLogs([])}
+                      className="text-[10px] text-slate-400 hover:text-slate-200"
+                    >
+                      Clear
+                    </button>
+                </div>
+                <div className="flex-1 overflow-y-auto px-3 py-2 font-mono text-[10px] space-y-1">
+                    {debugLogs.length === 0 ? (
+                      <div className="text-slate-500">No debug messages yet.</div>
+                    ) : (
+                      debugLogs.map(log => {
+                        const levelClass = log.level === 'error'
+                          ? 'text-red-300'
+                          : log.level === 'warn'
+                            ? 'text-amber-300'
+                            : 'text-slate-200';
+                        return (
+                          <div key={log.id} className="flex gap-2">
+                            <span className="text-slate-500">{log.timestamp}</span>
+                            <span className={`uppercase ${levelClass}`}>{log.level}</span>
+                            <span className={levelClass}>{log.message}</span>
+                          </div>
+                        );
+                      })
+                    )}
+                </div>
+            </div>
+            )}
         </div>
 
         {/* CANVAS */}
