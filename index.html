@@ -111,8 +111,9 @@ const PalletOptimizer = () => {
   const [stlUnits, setStlUnits] = useState('in');
   const [stlLoadStatus, setStlLoadStatus] = useState({ loaded: 0, total: 0, missing: [] });
   const [bomItems, setBomItems] = useState([]);
-  const [renderStlMeshes, setRenderStlMeshes] = useState(true);
-  const [renderProxyBoxes, setRenderProxyBoxes] = useState(false);
+  const [renderStlMeshes, setRenderStlMeshes] = useState(false);
+  const [renderProxyBoxes, setRenderProxyBoxes] = useState(true);
+  const [useStlForCollisions, setUseStlForCollisions] = useState(false);
   const [showPlacementBoxes, setShowPlacementBoxes] = useState(true);
   const [showVoxelDebug, setShowVoxelDebug] = useState(false);
   const [showStlBounds, setShowStlBounds] = useState(true);
@@ -151,10 +152,24 @@ const PalletOptimizer = () => {
     0x6366F1, 0x14B8A6, 0xF97316, 0x84CC16, 0x06B6D4, 0xD946EF
   ];
   const voxelSize = 0.25;
+  const shouldUseStlGeometry = useStlForCollisions || renderStlMeshes || showVoxelDebug || normalizeStlToBOM;
 
   // -------------------------------------------------------------------------
   // 1. DATA PARSING
   // -------------------------------------------------------------------------
+  const hasValidDims = (dims) => (
+    Number.isFinite(dims.x) &&
+    Number.isFinite(dims.y) &&
+    Number.isFinite(dims.z) &&
+    dims.x > 0 &&
+    dims.y > 0 &&
+    dims.z > 0
+  );
+
+  const getCsvDims = (item) => ({ x: item.width, y: item.height, z: item.length });
+  const hasValidCsvDims = (item) => hasValidDims(getCsvDims(item));
+
+  const shouldLoadStlForItem = (item) => !hasValidCsvDims(item) || shouldUseStlGeometry;
   // Load demo items to show the optimizer quickly
   const loadDemoData = () => {
     const demoItems = [
@@ -568,19 +583,24 @@ const PalletOptimizer = () => {
 
   const getItemDims = (item) => {
     const stl = loadedMeshes[item.stlKey];
-    if (stl && stl.dims && !normalizeStlToBOM) {
+    const csvDims = getCsvDims(item);
+    if (normalizeStlToBOM && hasValidDims(csvDims)) {
+      return csvDims;
+    }
+    if (stl && stl.dims && shouldUseStlGeometry && !normalizeStlToBOM) {
       return { x: stl.dims.x, y: stl.dims.y, z: stl.dims.z };
     }
-    return { x: item.width, y: item.height, z: item.length };
+    return csvDims;
   };
 
   const getItemVoxelGrid = (item, rotation, vertical) => {
     const stl = loadedMeshes[item.stlKey];
-    if (stl && stl.voxelGrid && !normalizeStlToBOM) {
+    if (stl && stl.voxelGrid && !normalizeStlToBOM && (useStlForCollisions || showVoxelDebug)) {
       return rotateVoxelGrid(stl.voxelGrid, rotation, vertical);
     }
-    const key = `box:${item.width}x${item.height}x${item.length}`;
-    const baseGrid = voxelCache[key] || voxelizeBox({ x: item.width, y: item.height, z: item.length }, voxelSize);
+    const dims = getItemDims(item);
+    const key = `box:${dims.x}x${dims.y}x${dims.z}`;
+    const baseGrid = voxelCache[key] || voxelizeBox(dims, voxelSize);
     if (!voxelCache[key]) {
       setVoxelCache(prev => ({ ...prev, [key]: baseGrid }));
     }
@@ -617,7 +637,7 @@ const PalletOptimizer = () => {
     return applied;
   };
 
-  const loadStlFile = async (file, stlKey) => {
+  const loadStlFile = async (file, stlKey, shouldVoxelize) => {
     let payload;
     try {
       payload = await file.arrayBuffer();
@@ -648,7 +668,7 @@ const PalletOptimizer = () => {
       y: centeredBox.max.y - centeredBox.min.y,
       z: centeredBox.max.z - centeredBox.min.z
     };
-    const voxelGrid = voxelizeMesh(geometry, voxelSize);
+    const voxelGrid = shouldVoxelize ? voxelizeMesh(geometry, voxelSize) : null;
     if (applied.length > 0) {
       addDebugLog(`Auto-oriented STL "${stlKey}" with ${applied.join(', ')}.`, 'info');
     }
@@ -682,7 +702,9 @@ const PalletOptimizer = () => {
       setStlLoadStatus({ loaded: 0, total: 0, missing: [] });
       return;
     }
-    const requiredKeys = Array.from(new Set(bomItems.map(item => item.stlKey)));
+    const requiredKeys = Array.from(
+      new Set(bomItems.filter(shouldLoadStlForItem).map(item => item.stlKey))
+    );
     const hasStlFiles = Object.keys(stlFiles).length > 0;
 
     setLoadedMeshes(prev => {
@@ -705,7 +727,7 @@ const PalletOptimizer = () => {
       return updated;
     });
 
-    if (!hasStlFiles) {
+    if (!hasStlFiles || requiredKeys.length === 0) {
       setStlLoadStatus({ loaded: 0, total: 0, missing: [] });
       return;
     }
@@ -740,7 +762,7 @@ const PalletOptimizer = () => {
         }
         stlLoadAttemptsRef.current.set(key, { status: 'pending', signature });
         try {
-          const result = await loadStlFile(file, key);
+          const result = await loadStlFile(file, key, useStlForCollisions || showVoxelDebug);
           nextLoaded[key] = result;
           loadedCount += 1;
           stlLoadAttemptsRef.current.set(key, { status: 'loaded', signature });
@@ -777,7 +799,17 @@ const PalletOptimizer = () => {
     };
     loadAll();
     return () => { isCancelled = true; };
-  }, [bomItems, stlFiles, stlUnits, loadedMeshes, addDebugLog]);
+  }, [
+    bomItems,
+    stlFiles,
+    stlUnits,
+    loadedMeshes,
+    renderStlMeshes,
+    showVoxelDebug,
+    useStlForCollisions,
+    normalizeStlToBOM,
+    addDebugLog
+  ]);
 
   useEffect(() => {
     if (bomItems.length === 0) return;
@@ -807,7 +839,10 @@ const PalletOptimizer = () => {
 
   useEffect(() => {
     if (items.length === 0) return;
-    const stlReady = stlLoadStatus.total === 0 || stlLoadStatus.loaded === stlLoadStatus.total;
+    const requiredKeys = Array.from(
+      new Set(bomItems.filter(item => !hasValidCsvDims(item)).map(item => item.stlKey))
+    );
+    const stlReady = requiredKeys.length === 0 || requiredKeys.every(key => loadedMeshes[key]);
     if (!stlReady) return;
     if (isConfigDirty && lastRunConfig !== null) return;
     const autoKey = [
@@ -822,7 +857,7 @@ const PalletOptimizer = () => {
     runOptimization();
   }, [
     items,
-    bomItems.length,
+    bomItems,
     loadedMeshes,
     stlLoadStatus.loaded,
     stlLoadStatus.total,
@@ -894,15 +929,6 @@ const PalletOptimizer = () => {
 
     return { dims, vertical };
   };
-
-  const hasValidDims = (dims) => (
-    Number.isFinite(dims.x) &&
-    Number.isFinite(dims.y) &&
-    Number.isFinite(dims.z) &&
-    dims.x > 0 &&
-    dims.y > 0 &&
-    dims.z > 0
-  );
 
   const computeDeadzoneBox = (pallet) => {
     if (!pallet.items.length) return null;
@@ -1696,9 +1722,17 @@ const PalletOptimizer = () => {
                 </label>
                 <div className="text-[10px] text-gray-500">
                     {stlFilesAvailable
-                      ? `Loaded ${stlLoadStatus.loaded} / ${stlLoadStatus.total} required STLs`
+                      ? `Loaded ${stlLoadStatus.loaded} / ${stlLoadStatus.total} queued STLs`
                       : 'No STL folder selected (CSV-only mode).'}
                 </div>
+                <label className="flex items-center gap-2 text-xs text-gray-600">
+                  <input
+                    type="checkbox"
+                    checked={useStlForCollisions}
+                    onChange={e => setUseStlForCollisions(e.target.checked)}
+                  />
+                  Use STL geometry for collision checks (slower)
+                </label>
                 {stlFilesAvailable && stlLoadStatus.missing.length > 0 && (
                   <div className="text-[10px] text-amber-700">
                     Missing: {stlLoadStatus.missing.join(', ')}
@@ -1719,11 +1753,17 @@ const PalletOptimizer = () => {
                 {bomItems.length > 0 && (
                   <div className="space-y-1 text-[10px] text-gray-600">
                     {bomItems.map((item, idx) => {
-                      const isMissing = stlFilesAvailable && (missingStlSet.has(item.stlKey) || !item.stlFound);
-                      const statusText = stlFilesAvailable ? (isMissing ? 'Missing STL' : 'STL Found') : 'STL optional';
-                      const statusClass = stlFilesAvailable
-                        ? (isMissing ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700')
-                        : 'bg-slate-100 text-slate-600';
+                      const csvDimsOk = hasValidCsvDims(item);
+                      const stlMissing = stlFilesAvailable && (missingStlSet.has(item.stlKey) || !item.stlFound);
+                      let statusText = 'CSV dims';
+                      let statusClass = 'bg-slate-100 text-slate-600';
+                      if (!csvDimsOk) {
+                        statusText = stlMissing ? 'Missing STL' : 'STL required';
+                        statusClass = stlMissing ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700';
+                      } else if (stlFilesAvailable && item.stlFound && shouldUseStlGeometry) {
+                        statusText = 'STL ready';
+                        statusClass = 'bg-emerald-100 text-emerald-700';
+                      }
                       return (
                         <div key={idx} className="flex justify-between items-center bg-gray-50 border rounded px-2 py-1">
                           <span>{item.itemNumber}</span>
@@ -1766,7 +1806,7 @@ const PalletOptimizer = () => {
                 <h2 className="text-xs font-bold text-gray-400 uppercase tracking-wider">Display</h2>
                 <label className="flex items-center gap-2 text-xs text-gray-600">
                   <input type="checkbox" checked={renderStlMeshes} onChange={e => setRenderStlMeshes(e.target.checked)} />
-                  Render STL meshes
+                  Render STL meshes (loads geometry)
                 </label>
                 <label className="flex items-center gap-2 text-xs text-gray-600">
                   <input type="checkbox" checked={renderProxyBoxes} onChange={e => setRenderProxyBoxes(e.target.checked)} />
