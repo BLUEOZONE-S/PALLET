@@ -145,6 +145,7 @@ const PalletOptimizer = () => {
   const mountRef = useRef(null);
   const sceneRef = useRef(null);
   const rendererRef = useRef(null);
+  const cameraStateRef = useRef({ viewKey: null, position: null, target: null });
 
   // Consistent colors for items in the scene
   const colorPalette = [
@@ -1391,8 +1392,36 @@ const PalletOptimizer = () => {
 
     // Camera and renderer setup
     const camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 2000);
-    camera.position.set(config.palletWidth * 2.5, config.palletLength * 0.6, config.palletLength * 1.2);
-    camera.lookAt(config.palletWidth / 2, 40, config.palletLength / 2);
+    const defaultTarget = new THREE.Vector3(config.palletWidth / 2, 40, config.palletLength / 2);
+    const viewKey = `${currentPalletView}-${pallets.length}-${config.palletWidth}-${config.palletLength}-${config.maxHeight}`;
+    const storedCamera = cameraStateRef.current;
+    const shouldResetCamera = storedCamera.viewKey !== viewKey || !storedCamera.position;
+
+    if (shouldResetCamera) {
+      camera.position.set(config.palletWidth * 2.5, config.palletLength * 0.6, config.palletLength * 1.2);
+      camera.lookAt(defaultTarget);
+      cameraStateRef.current = {
+        viewKey,
+        position: {
+          x: camera.position.x,
+          y: camera.position.y,
+          z: camera.position.z
+        },
+        target: { x: defaultTarget.x, y: defaultTarget.y, z: defaultTarget.z }
+      };
+    } else {
+      camera.position.set(
+        storedCamera.position.x,
+        storedCamera.position.y,
+        storedCamera.position.z
+      );
+      const savedTarget = new THREE.Vector3(
+        storedCamera.target.x,
+        storedCamera.target.y,
+        storedCamera.target.z
+      );
+      camera.lookAt(savedTarget);
+    }
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(width, height);
@@ -1551,7 +1580,11 @@ const PalletOptimizer = () => {
     // Simple mouse drag orbit controls
     let isDragging = false;
     let prevPos = { x: 0, y: 0 };
-    const target = new THREE.Vector3(config.palletWidth/2, config.maxHeight/3, config.palletLength/2);
+    const target = new THREE.Vector3(
+      cameraStateRef.current.target.x,
+      cameraStateRef.current.target.y,
+      cameraStateRef.current.target.z
+    );
 
     const onMouseDown = (e) => { isDragging = true; prevPos = { x: e.clientX, y: e.clientY }; };
     const onMouseUp = () => { isDragging = false; };
@@ -1570,6 +1603,11 @@ const PalletOptimizer = () => {
         camera.position.y = target.y + radius * Math.cos(newPhi);
         camera.position.z = target.z + radius * Math.sin(newPhi) * Math.cos(newTheta);
         camera.lookAt(target);
+        cameraStateRef.current = {
+          viewKey,
+          position: { x: camera.position.x, y: camera.position.y, z: camera.position.z },
+          target: { x: target.x, y: target.y, z: target.z }
+        };
     };
 
     renderer.domElement.addEventListener('mousedown', onMouseDown);
