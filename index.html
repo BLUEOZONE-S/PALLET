@@ -123,6 +123,8 @@ const PalletOptimizer = () => {
   const stlFilesAvailable = Object.keys(stlFiles).length > 0;
   const debugLogLimit = 200;
   const lastMissingKeyRef = useRef('');
+  const stlLoadAttemptsRef = useRef(new Map());
+  const lastAutoRunRef = useRef('');
   
   // User-controlled configuration for pallet constraints and framing
   const [config, setConfig] = useState({
@@ -267,6 +269,21 @@ const PalletOptimizer = () => {
       if (!file.name.toLowerCase().endsWith('.stl')) return;
       const baseName = file.name.replace(/\.stl$/i, '').trim().toLowerCase();
       if (baseName) nextMap[baseName] = file;
+    });
+    stlLoadAttemptsRef.current.clear();
+    setLoadedMeshes(prev => {
+      const next = { ...prev };
+      Object.keys(nextMap).forEach(key => {
+        delete next[key];
+      });
+      return next;
+    });
+    setVoxelCache(prev => {
+      const updated = { ...prev };
+      Object.keys(nextMap).forEach(key => {
+        delete updated[`stl:${key}`];
+      });
+      return updated;
     });
     setStlFiles(prev => ({ ...prev, ...nextMap }));
     addDebugLog(`STL folder selected. ${Object.keys(nextMap).length} STL file(s) indexed.`, 'info');
@@ -641,7 +658,24 @@ const PalletOptimizer = () => {
   useEffect(() => {
     setLoadedMeshes({});
     setVoxelCache({});
+    stlLoadAttemptsRef.current.clear();
   }, [stlUnits]);
+
+  useEffect(() => {
+    const attempts = stlLoadAttemptsRef.current;
+    Object.entries(stlFiles).forEach(([key, file]) => {
+      const signature = `${file.name}:${file.size}:${file.lastModified}`;
+      const existing = attempts.get(key);
+      if (existing && existing.signature !== signature) {
+        attempts.delete(key);
+      }
+    });
+    Array.from(attempts.keys()).forEach(key => {
+      if (!stlFiles[key]) {
+        attempts.delete(key);
+      }
+    });
+  }, [stlFiles]);
 
   useEffect(() => {
     if (bomItems.length === 0) {
@@ -677,21 +711,39 @@ const PalletOptimizer = () => {
     }
     let isCancelled = false;
     const missing = requiredKeys.filter(key => !stlFiles[key]);
-    setStlLoadStatus({ loaded: 0, total: requiredKeys.length, missing });
+    const failedKeys = requiredKeys.filter(key => {
+      const file = stlFiles[key];
+      const attempt = stlLoadAttemptsRef.current.get(key);
+      if (!file || !attempt) return false;
+      const signature = `${file.name}:${file.size}:${file.lastModified}`;
+      return attempt.status === 'failed' && attempt.signature === signature;
+    });
+    const missingList = Array.from(new Set([...missing, ...failedKeys]));
+    setStlLoadStatus({ loaded: 0, total: requiredKeys.length, missing: missingList });
 
     const loadAll = async () => {
       let loadedCount = 0;
       const nextLoaded = {};
       for (const key of requiredKeys) {
-        if (!stlFiles[key]) continue;
+        const file = stlFiles[key];
+        if (!file) continue;
         if (loadedMeshes[key]) {
           loadedCount += 1;
           continue;
         }
+        const signature = `${file.name}:${file.size}:${file.lastModified}`;
+        const attempt = stlLoadAttemptsRef.current.get(key);
+        if (attempt && attempt.signature === signature) {
+          if (attempt.status === 'failed' || attempt.status === 'pending') {
+            continue;
+          }
+        }
+        stlLoadAttemptsRef.current.set(key, { status: 'pending', signature });
         try {
-          const result = await loadStlFile(stlFiles[key], key);
+          const result = await loadStlFile(file, key);
           nextLoaded[key] = result;
           loadedCount += 1;
+          stlLoadAttemptsRef.current.set(key, { status: 'loaded', signature });
           if (!isCancelled) {
             setStlLoadStatus(prev => ({ ...prev, loaded: loadedCount }));
           }
@@ -702,9 +754,10 @@ const PalletOptimizer = () => {
             );
           }
         } catch (err) {
-          missing.push(key);
+          missingList.push(key);
+          stlLoadAttemptsRef.current.set(key, { status: 'failed', signature });
           if (!isCancelled) {
-            setStlLoadStatus(prev => ({ ...prev, missing: Array.from(new Set(missing)) }));
+            setStlLoadStatus(prev => ({ ...prev, missing: Array.from(new Set(missingList)) }));
           }
           if (!isCancelled) {
             addDebugLog(`Failed to load STL "${key}": ${err.message || err}`, 'error');
@@ -751,6 +804,31 @@ const PalletOptimizer = () => {
       addDebugLog('All required STL files loaded.', 'info');
     }
   }, [stlLoadStatus, addDebugLog]);
+
+  useEffect(() => {
+    if (items.length === 0) return;
+    const stlReady = stlLoadStatus.total === 0 || stlLoadStatus.loaded === stlLoadStatus.total;
+    if (!stlReady) return;
+    if (isConfigDirty && lastRunConfig !== null) return;
+    const autoKey = [
+      items.length,
+      bomItems.length,
+      Object.keys(loadedMeshes).length,
+      stlLoadStatus.loaded,
+      stlLoadStatus.total
+    ].join('|');
+    if (autoKey === lastAutoRunRef.current) return;
+    lastAutoRunRef.current = autoKey;
+    runOptimization();
+  }, [
+    items,
+    bomItems.length,
+    loadedMeshes,
+    stlLoadStatus.loaded,
+    stlLoadStatus.total,
+    isConfigDirty,
+    lastRunConfig
+  ]);
 
   // -------------------------------------------------------------------------
   // 2. FRAMING GENERATOR (The Wood Structure)
