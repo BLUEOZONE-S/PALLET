@@ -116,6 +116,7 @@ const PalletOptimizer = () => {
   const [showPlacementBoxes, setShowPlacementBoxes] = useState(true);
   const [showVoxelDebug, setShowVoxelDebug] = useState(false);
   const [normalizeStlToBOM, setNormalizeStlToBOM] = useState(true);
+  const stlFilesAvailable = Object.keys(stlFiles).length > 0;
   
   // User-controlled configuration for pallet constraints and framing
   const [config, setConfig] = useState({
@@ -238,7 +239,7 @@ const PalletOptimizer = () => {
       const baseName = file.name.replace(/\.stl$/i, '').trim().toLowerCase();
       if (baseName) nextMap[baseName] = file;
     });
-    setStlFiles(nextMap);
+    setStlFiles(prev => ({ ...prev, ...nextMap }));
   };
 
   const createVoxelGrid = (nx, ny, nz, voxelSize, data) => {
@@ -586,8 +587,34 @@ const PalletOptimizer = () => {
       setStlLoadStatus({ loaded: 0, total: 0, missing: [] });
       return;
     }
-    let isCancelled = false;
     const requiredKeys = Array.from(new Set(bomItems.map(item => item.stlKey)));
+    const hasStlFiles = Object.keys(stlFiles).length > 0;
+
+    setLoadedMeshes(prev => {
+      const pruned = {};
+      requiredKeys.forEach(key => {
+        if (prev[key]) pruned[key] = prev[key];
+      });
+      return pruned;
+    });
+    setVoxelCache(prev => {
+      const updated = { ...prev };
+      Object.keys(updated).forEach(key => {
+        if (key.startsWith('stl:')) {
+          const stlKey = key.slice(4);
+          if (!requiredKeys.includes(stlKey)) {
+            delete updated[key];
+          }
+        }
+      });
+      return updated;
+    });
+
+    if (!hasStlFiles) {
+      setStlLoadStatus({ loaded: 0, total: 0, missing: [] });
+      return;
+    }
+    let isCancelled = false;
     const missing = requiredKeys.filter(key => !stlFiles[key]);
     setStlLoadStatus({ loaded: 0, total: requiredKeys.length, missing });
 
@@ -881,7 +908,6 @@ const PalletOptimizer = () => {
               position: { x: posX, y: posY, z: posZ },
               rotation: { x: 0, y: rotationYRadians, z: 0 },
               finalDims: ri.dims,
-              hasStl: Boolean(loadedMeshes[ri.stlKey]),
               vertical: ri.vertical
             });
             stampVoxels(voxelGrid, pallet.voxelGrid, { x: posX, y: posY, z: posZ }, ri.dims);
@@ -1125,7 +1151,7 @@ const PalletOptimizer = () => {
     pallet.items.forEach((item) => {
       const dims = item.finalDims;
       const stlData = loadedMeshes[item.stlKey];
-      const shouldRenderStl = renderStlMeshes && !renderProxyBoxes && item.hasStl && stlData;
+      const shouldRenderStl = renderStlMeshes && !renderProxyBoxes && stlData;
       const shouldRenderBox = renderProxyBoxes || !shouldRenderStl;
 
       if (shouldRenderStl) {
@@ -1178,7 +1204,7 @@ const PalletOptimizer = () => {
         scene.add(boxMesh);
       }
 
-      if (showVoxelDebug && item.hasStl) {
+      if (showVoxelDebug && stlData) {
         const debugGrid = getItemVoxelGrid(item, item.rotation.y * (180 / Math.PI), item.vertical);
         const maxInstances = Math.min(debugGrid.occupied.length, 5000);
         const cubeGeo = new THREE.BoxGeometry(voxelSize, voxelSize, voxelSize);
@@ -1376,9 +1402,11 @@ const PalletOptimizer = () => {
                     <input type="file" className="hidden" accept=".stl" multiple webkitdirectory="true" directory="true" onChange={loadSTLFolder} />
                 </label>
                 <div className="text-[10px] text-gray-500">
-                    Loaded {stlLoadStatus.loaded} / {stlLoadStatus.total} required STLs
+                    {stlFilesAvailable
+                      ? `Loaded ${stlLoadStatus.loaded} / ${stlLoadStatus.total} required STLs`
+                      : 'No STL folder selected (CSV-only mode).'}
                 </div>
-                {stlLoadStatus.missing.length > 0 && (
+                {stlFilesAvailable && stlLoadStatus.missing.length > 0 && (
                   <div className="text-[10px] text-amber-700">
                     Missing: {stlLoadStatus.missing.join(', ')}
                   </div>
@@ -1398,13 +1426,17 @@ const PalletOptimizer = () => {
                 {bomItems.length > 0 && (
                   <div className="space-y-1 text-[10px] text-gray-600">
                     {bomItems.map((item, idx) => {
-                      const isMissing = missingStlSet.has(item.stlKey) || !item.stlFound;
+                      const isMissing = stlFilesAvailable && (missingStlSet.has(item.stlKey) || !item.stlFound);
+                      const statusText = stlFilesAvailable ? (isMissing ? 'Missing STL' : 'STL Found') : 'STL optional';
+                      const statusClass = stlFilesAvailable
+                        ? (isMissing ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700')
+                        : 'bg-slate-100 text-slate-600';
                       return (
                         <div key={idx} className="flex justify-between items-center bg-gray-50 border rounded px-2 py-1">
                           <span>{item.itemNumber}</span>
                           <span className="text-gray-400">x{item.qty}</span>
-                          <span className={`px-2 py-0.5 rounded ${isMissing ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>
-                            {isMissing ? 'Missing STL' : 'STL Found'}
+                          <span className={`px-2 py-0.5 rounded ${statusClass}`}>
+                            {statusText}
                           </span>
                         </div>
                       );
