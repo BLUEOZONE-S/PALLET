@@ -39,6 +39,15 @@
     <div id="root"></div>
 
     <script type="text/babel">
+        /*
+         * Structural Crate Optimizer
+         * - Loads item manifests from CSV or demo data.
+         * - Expands quantities into individual items and runs a packing algorithm.
+         * - Builds pallets with framed wood pockets and optional diagonal bracing.
+         * - Enforces max dimensions/weight, optional vertical placement, and safety gaps.
+         * - Visualizes the resulting crate with Three.js and renders UI controls with React.
+         */
+
         // --- SHIMS AND POLYFILLS ---
 
         // 1. React Globals
@@ -87,7 +96,7 @@
 
 
 const PalletOptimizer = () => {
-  // State
+  // React state: items, computed pallets, and UI status
   const [items, setItems] = useState([]);
   const [pallets, setPallets] = useState([]);
   const [errors, setErrors] = useState([]);
@@ -95,7 +104,7 @@ const PalletOptimizer = () => {
   const [lastRunConfig, setLastRunConfig] = useState(null);
   const [isConfigDirty, setIsConfigDirty] = useState(false);
   
-  // Configuration
+  // User-controlled configuration for pallet constraints and framing
   const [config, setConfig] = useState({
     palletLength: 250, // Max length 20'10"
     palletWidth: 84,   // Max width 7'
@@ -109,12 +118,12 @@ const PalletOptimizer = () => {
     allowVertical: true // Allow items to stand if they fit
   });
 
-  // Refs for 3D
+  // Three.js mounts and references
   const mountRef = useRef(null);
   const sceneRef = useRef(null);
   const rendererRef = useRef(null);
 
-  // Colors
+  // Consistent colors for items in the scene
   const colorPalette = [
     0x3B82F6, 0xEF4444, 0x10B981, 0xF59E0B, 0x8B5CF6, 0xEC4899,
     0x6366F1, 0x14B8A6, 0xF97316, 0x84CC16, 0x06B6D4, 0xD946EF
@@ -123,6 +132,7 @@ const PalletOptimizer = () => {
   // -------------------------------------------------------------------------
   // 1. DATA PARSING
   // -------------------------------------------------------------------------
+  // Load demo items to show the optimizer quickly
   const loadDemoData = () => {
     const demoItems = [
       { itemNumber: 'PIPE-240-HVY', height: 4.5, width: 4.5, length: 240, weight: 180, qty: 4 },
@@ -133,6 +143,7 @@ const PalletOptimizer = () => {
     processItems(demoItems);
   };
 
+  // Parse CSV uploads and convert into item objects
   const handleFileUpload = (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -163,6 +174,7 @@ const PalletOptimizer = () => {
     reader.readAsText(file);
   };
 
+  // Expand each row by quantity and reset results
   const processItems = (rawItems) => {
     const expanded = [];
     rawItems.forEach((item, idx) => {
@@ -183,7 +195,7 @@ const PalletOptimizer = () => {
   // 2. FRAMING GENERATOR (The Wood Structure)
   // -------------------------------------------------------------------------
 
-  // Helper to create a single wood piece
+  // Helper to create a single wood piece with dims and position
   const createLumber = (type, dimX, dimY, dimZ, posX, posY, posZ) => ({
       type,
       dims: { x: dimX, y: dimY, z: dimZ },
@@ -194,6 +206,22 @@ const PalletOptimizer = () => {
   // 3. OPTIMIZATION ALGORITHM
   // -------------------------------------------------------------------------
 
+  // Calculate the preferred orientation for sorting/stacking decisions
+  const getPreferredOrientation = (item) => {
+    let dims = { x: item.width, y: item.height, z: item.length };
+    let vertical = false;
+
+    if (config.allowVertical && item.length < config.maxHeight && item.length < 90) {
+      dims = { x: item.width, y: item.length, z: item.height };
+      vertical = true;
+    } else if (item.width > item.height) {
+      dims = { x: item.height, y: item.width, z: item.length };
+    }
+
+    return { dims, vertical };
+  };
+
+  // Run the crate build and placement algorithm
   const runOptimization = () => {
     if (items.length === 0) return;
     setLastRunConfig({ ...config });
@@ -201,8 +229,13 @@ const PalletOptimizer = () => {
     
     const workingItems = items.map((item) => ({ ...item, isPlaced: false }));
 
-    // Sort: Heaviest on bottom, then largest size when weights are similar
+    // Sort: Longer horizontal parts first (bottom layers), then heavier items
     const sortedQueue = [...workingItems].sort((a, b) => {
+      const aOrientation = getPreferredOrientation(a);
+      const bOrientation = getPreferredOrientation(b);
+      const aLength = aOrientation.vertical ? 0 : aOrientation.dims.z;
+      const bLength = bOrientation.vertical ? 0 : bOrientation.dims.z;
+      if (aLength !== bLength) return bLength - aLength;
       const weightDelta = b.weight - a.weight;
       if (Math.abs(weightDelta) > 5) return weightDelta;
       const aVolume = a.length * a.width * a.height;
@@ -213,7 +246,7 @@ const PalletOptimizer = () => {
 
     const newPallets = [];
     
-    // Effective dimensions
+    // Effective dimensions (after safety gap)
     const effWidth = config.palletWidth - (config.safetyGap * 2);
     const effLength = config.palletLength - (config.safetyGap * 2);
 
@@ -227,6 +260,7 @@ const PalletOptimizer = () => {
         woodUsage: 0
       };
 
+      // Current vertical placement height and layer tracking
       let layerY = config.lumberThick; // Start on top of bottom runners
       let maxHeightUsed = layerY;
       let palletActive = true;
@@ -239,6 +273,7 @@ const PalletOptimizer = () => {
       });
 
       while (palletActive) {
+        // Track row composition and footprint for this layer
         const rowItems = [];
         let rowWidthUsed = 0;
         let rowMaxHeight = 0;
@@ -248,6 +283,11 @@ const PalletOptimizer = () => {
           .map((item, index) => ({ item, index }))
           .filter(({ item }) => !item.isPlaced)
           .sort((a, b) => {
+            const aOrientation = getPreferredOrientation(a.item);
+            const bOrientation = getPreferredOrientation(b.item);
+            const aLength = aOrientation.vertical ? 0 : aOrientation.dims.z;
+            const bLength = bOrientation.vertical ? 0 : bOrientation.dims.z;
+            if (aLength !== bLength) return bLength - aLength;
             const weightDelta = b.item.weight - a.item.weight;
             if (Math.abs(weightDelta) > 5) return weightDelta;
             const aVolume = a.item.length * a.item.width * a.item.height;
@@ -256,7 +296,7 @@ const PalletOptimizer = () => {
             return b.item.length - a.item.length;
           });
 
-        // Try to fill a row
+        // Try to fill a row with items from the sorted queue
         for (const candidate of fillOrder) {
           const item = candidate.item;
           const i = candidate.index;
@@ -266,15 +306,9 @@ const PalletOptimizer = () => {
           if (pallet.totalWeight + item.weight > config.maxWeight) continue;
 
           // Determine Orientation
-          let dims = { x: item.width, y: item.height, z: item.length };
-          let vertical = false;
-
-          if (config.allowVertical && item.length < config.maxHeight && item.length < 90) {
-              dims = { x: item.width, y: item.length, z: item.height }; 
-              vertical = true;
-          } else {
-              if (item.width > item.height) dims = { x: item.height, y: item.width, z: item.length };
-          }
+          const orientation = getPreferredOrientation(item);
+          let dims = orientation.dims;
+          let vertical = orientation.vertical;
 
           // VERTICAL CONSTRAINT: Must be on base layer
           // If we have moved up from the base layer (layerY > config.lumberThick), verticals are forbidden
@@ -293,6 +327,7 @@ const PalletOptimizer = () => {
               itemFootprintWidth += 0.5; // Small buffer
           }
 
+          // Enforce space for the vertical zone at the back of the pallet
           const reservedDepth = pallet.verticalZoneDepth || 0;
           const usableLength = effLength - reservedDepth;
           if (!vertical && dims.z > usableLength) continue; 
@@ -304,7 +339,7 @@ const PalletOptimizer = () => {
           rowMaxHeight = Math.max(rowMaxHeight, dims.y);
           rowMaxLength = Math.max(rowMaxLength, dims.z);
           
-          // Mark as placed and UPDATE WEIGHT IMMEDIATELY
+          // Mark as placed and update weight immediately
           item.isPlaced = true; 
           pallet.totalWeight += item.weight;
         }
@@ -349,7 +384,7 @@ const PalletOptimizer = () => {
                 const leftPostX = itemX - (config.lumberWidth / 2);
                 const rightPostX = itemX + ri.dims.x + (config.lumberWidth / 2);
 
-                // Iterate Z-axis for Cradle Points (every 48")
+                // Iterate Z-axis for cradle points (every framing spacing)
                 for (let z = 0; z <= frameLen; z += config.framingSpacing) {
                     const zPos = zStartGlobal + z;
                     
@@ -408,6 +443,7 @@ const PalletOptimizer = () => {
             }
           });
 
+          // Update layer height depending on row type
           if (isVerticalRow) {
               pallet.verticalZoneDepth = Math.max(
                 pallet.verticalZoneDepth,
@@ -423,7 +459,7 @@ const PalletOptimizer = () => {
         }
       }
 
-      // Calculate Wood Usage
+      // Calculate Wood Usage (linear feet approximation)
       let totalVol = 0;
       pallet.woodFrames.forEach(L => {
           if (L.isDiagonal) {
@@ -437,6 +473,7 @@ const PalletOptimizer = () => {
       });
       pallet.woodUsage = (totalVol / 12).toFixed(1);
 
+      // Validate if at least one item could be placed
       const remaining = sortedQueue.filter(i => !i.isPlaced);
       if (remaining.length === sortedQueue.length) {
         setErrors(["Item fits failed. Check max dimensions."]);
@@ -453,6 +490,7 @@ const PalletOptimizer = () => {
       if (sortedQueue.length === 0) break;
     }
 
+    // Commit results to state
     setPallets(newPallets);
     if(newPallets.length > 0) setCurrentPalletView(0);
   };
@@ -467,6 +505,7 @@ const PalletOptimizer = () => {
   // 4. THREE.JS RENDERING
   // -------------------------------------------------------------------------
 
+  // Render the pallet scene every time the pallet data or view changes
   useEffect(() => {
     if (pallets.length === 0) return;
     const pallet = pallets[currentPalletView];
@@ -477,6 +516,7 @@ const PalletOptimizer = () => {
     scene.background = new THREE.Color(0xf3f4f6);
     sceneRef.current = scene;
 
+    // Camera and renderer setup
     const camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 2000);
     camera.position.set(config.palletWidth * 2.5, config.palletLength * 0.6, config.palletLength * 1.2);
     camera.lookAt(config.palletWidth / 2, 40, config.palletLength / 2);
@@ -488,6 +528,7 @@ const PalletOptimizer = () => {
     mountRef.current.appendChild(renderer.domElement);
     rendererRef.current = renderer;
 
+    // Lighting for readability
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
     scene.add(ambientLight);
     const dirLight = new THREE.DirectionalLight(0xffffff, 0.7);
@@ -550,6 +591,7 @@ const PalletOptimizer = () => {
         }
     });
 
+    // Simple mouse drag orbit controls
     let isDragging = false;
     let prevPos = { x: 0, y: 0 };
     const target = new THREE.Vector3(config.palletWidth/2, config.maxHeight/3, config.palletLength/2);
@@ -577,6 +619,7 @@ const PalletOptimizer = () => {
     window.addEventListener('mouseup', onMouseUp);
     window.addEventListener('mousemove', onMouseMove);
 
+    // Render loop
     const animate = () => {
       requestAnimationFrame(animate);
       renderer.render(scene, camera);
