@@ -600,39 +600,43 @@ const PalletOptimizer = () => {
     return applied;
   };
 
-  const loadStlFile = (file, stlKey) => new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
+  const loadStlFile = async (file, stlKey) => {
+    let payload;
+    try {
+      payload = await file.arrayBuffer();
+    } catch (err) {
       try {
-        const loader = new THREE.STLLoader();
-        const geometry = loader.parse(reader.result);
-        const scale = stlUnits === 'mm' ? 1 / 25.4 : 1;
-        geometry.scale(scale, scale, scale);
-        const applied = autoOrientGeometry(geometry);
-        geometry.computeBoundingBox();
-        const bbox = geometry.boundingBox;
-        const center = new THREE.Vector3();
-        bbox.getCenter(center);
-        geometry.translate(-center.x, -center.y, -center.z);
-        geometry.computeBoundingBox();
-        const centeredBox = geometry.boundingBox;
-        const dims = {
-          x: centeredBox.max.x - centeredBox.min.x,
-          y: centeredBox.max.y - centeredBox.min.y,
-          z: centeredBox.max.z - centeredBox.min.z
-        };
-        const voxelGrid = voxelizeMesh(geometry, voxelSize);
-        if (applied.length > 0) {
-          addDebugLog(`Auto-oriented STL "${stlKey}" with ${applied.join(', ')}.`, 'info');
-        }
-        resolve({ stlKey, geometry, dims, voxelGrid });
-      } catch (err) {
-        reject(err);
+        payload = await file.text();
+      } catch (textErr) {
+        throw new Error(`Failed to read STL file "${file.name}".`);
       }
+    }
+    if (payload instanceof ArrayBuffer && payload.byteLength === 0) {
+      throw new Error(`STL file "${file.name}" is empty.`);
+    }
+    const loader = new THREE.STLLoader();
+    const geometry = loader.parse(payload);
+    const scale = stlUnits === 'mm' ? 1 / 25.4 : 1;
+    geometry.scale(scale, scale, scale);
+    const applied = autoOrientGeometry(geometry);
+    geometry.computeBoundingBox();
+    const bbox = geometry.boundingBox;
+    const center = new THREE.Vector3();
+    bbox.getCenter(center);
+    geometry.translate(-center.x, -center.y, -center.z);
+    geometry.computeBoundingBox();
+    const centeredBox = geometry.boundingBox;
+    const dims = {
+      x: centeredBox.max.x - centeredBox.min.x,
+      y: centeredBox.max.y - centeredBox.min.y,
+      z: centeredBox.max.z - centeredBox.min.z
     };
-    reader.onerror = () => reject(new Error('Failed to read STL'));
-    reader.readAsArrayBuffer(file);
-  });
+    const voxelGrid = voxelizeMesh(geometry, voxelSize);
+    if (applied.length > 0) {
+      addDebugLog(`Auto-oriented STL "${stlKey}" with ${applied.join(', ')}.`, 'info');
+    }
+    return { stlKey, geometry, dims, voxelGrid };
+  };
 
   useEffect(() => {
     setLoadedMeshes({});
