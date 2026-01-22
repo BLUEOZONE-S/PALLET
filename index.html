@@ -11,6 +11,7 @@
     <script src="libs/react-dom.development.js"></script>
     <script src="libs/babel.min.js"></script>
     <script src="libs/three.min.js"></script>
+    <script src="libs/STLLoader.js"></script>
     <script src="libs/lucide.min.js"></script>
     
     <!-- Extra libs from request template -->
@@ -103,6 +104,17 @@ const PalletOptimizer = () => {
   const [currentPalletView, setCurrentPalletView] = useState(0);
   const [lastRunConfig, setLastRunConfig] = useState(null);
   const [isConfigDirty, setIsConfigDirty] = useState(false);
+  const [stlFiles, setStlFiles] = useState({});
+  const [loadedMeshes, setLoadedMeshes] = useState({});
+  const [voxelCache, setVoxelCache] = useState({});
+  const [palletVoxelGrid, setPalletVoxelGrid] = useState([]);
+  const [stlUnits, setStlUnits] = useState('in');
+  const [stlLoadStatus, setStlLoadStatus] = useState({ loaded: 0, total: 0, missing: [] });
+  const [bomItems, setBomItems] = useState([]);
+  const [renderStlMeshes, setRenderStlMeshes] = useState(true);
+  const [renderProxyBoxes, setRenderProxyBoxes] = useState(false);
+  const [showPlacementBoxes, setShowPlacementBoxes] = useState(true);
+  const [showVoxelDebug, setShowVoxelDebug] = useState(false);
   
   // User-controlled configuration for pallet constraints and framing
   const [config, setConfig] = useState({
@@ -128,6 +140,7 @@ const PalletOptimizer = () => {
     0x3B82F6, 0xEF4444, 0x10B981, 0xF59E0B, 0x8B5CF6, 0xEC4899,
     0x6366F1, 0x14B8A6, 0xF97316, 0x84CC16, 0x06B6D4, 0xD946EF
   ];
+  const voxelSize = 0.25;
 
   // -------------------------------------------------------------------------
   // 1. DATA PARSING
@@ -144,6 +157,36 @@ const PalletOptimizer = () => {
   };
 
   // Parse CSV uploads and convert into item objects
+  const parseBOM = (text) => {
+    const lines = text.split(/\r?\n/).filter(line => line.trim().length > 0);
+    if (lines.length === 0) throw new Error('Empty CSV.');
+    const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
+    const required = ['number', 'h', 'w', 'l', 'weight', 'qty'];
+    const headerMap = {};
+    headers.forEach((h, idx) => { headerMap[h] = idx; });
+    const missingHeaders = required.filter(key => headerMap[key] === undefined);
+    if (missingHeaders.length > 0) {
+      throw new Error(`Missing headers: ${missingHeaders.join(', ')}`);
+    }
+
+    const parsedItems = [];
+    for (let i = 1; i < lines.length; i++) {
+      const row = lines[i].split(',').map(cell => cell.trim());
+      const itemNumber = row[headerMap.number];
+      if (!itemNumber) continue;
+      const item = {
+        itemNumber,
+        height: parseFloat(row[headerMap.h]),
+        width: parseFloat(row[headerMap.w]),
+        length: parseFloat(row[headerMap.l]),
+        weight: parseFloat(row[headerMap.weight]),
+        qty: parseFloat(row[headerMap.qty]) || 1
+      };
+      if (!isNaN(item.height) && !isNaN(item.weight)) parsedItems.push(item);
+    }
+    return parsedItems;
+  };
+
   const handleFileUpload = (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -151,24 +194,10 @@ const PalletOptimizer = () => {
     reader.onload = (event) => {
       try {
         const text = event.target.result;
-        const rows = text.split('\n').map(row => row.split(',').map(cell => cell.trim()));
-        const parsedItems = [];
-        for (let i = 1; i < rows.length; i++) {
-          const row = rows[i];
-          if (row.length < 6 || !row[0]) continue;
-          const item = {
-            itemNumber: row[0],
-            height: parseFloat(row[1]),
-            width: parseFloat(row[2]),
-            length: parseFloat(row[3]),
-            weight: parseFloat(row[4]),
-            qty: parseFloat(row[5]) || 1,
-          };
-          if (!isNaN(item.height) && !isNaN(item.weight)) parsedItems.push(item);
-        }
+        const parsedItems = parseBOM(text);
         processItems(parsedItems);
       } catch (err) {
-        setErrors(['Failed to parse CSV.']);
+        setErrors([err.message || 'Failed to parse CSV.']);
       }
     };
     reader.readAsText(file);
@@ -176,8 +205,13 @@ const PalletOptimizer = () => {
 
   // Expand each row by quantity and reset results
   const processItems = (rawItems) => {
+    const nextBomItems = rawItems.map(item => {
+      const stlKey = item.itemNumber.trim().toLowerCase();
+      const stlFound = Boolean(stlFiles[stlKey]);
+      return { ...item, stlKey, stlFound };
+    });
     const expanded = [];
-    rawItems.forEach((item, idx) => {
+    nextBomItems.forEach((item, idx) => {
       for (let i = 0; i < item.qty; i++) {
         expanded.push({
           ...item,
@@ -186,10 +220,419 @@ const PalletOptimizer = () => {
         });
       }
     });
+    setBomItems(nextBomItems);
     setItems(expanded);
     setPallets([]);
     setErrors([]);
   };
+
+  // -------------------------------------------------------------------------
+  // 1B. STL + VOXEL HANDLING
+  // -------------------------------------------------------------------------
+  const loadSTLFolder = (e) => {
+    const files = Array.from(e.target.files || []);
+    const nextMap = {};
+    files.forEach((file) => {
+      if (!file.name.toLowerCase().endsWith('.stl')) return;
+      const baseName = file.name.replace(/\.stl$/i, '').trim().toLowerCase();
+      if (baseName) nextMap[baseName] = file;
+    });
+    setStlFiles(nextMap);
+  };
+
+  const createVoxelGrid = (nx, ny, nz, voxelSize, data) => {
+    const filled = data || new Uint8Array(nx * ny * nz);
+    const occupied = [];
+    for (let i = 0; i < filled.length; i++) {
+      if (filled[i]) occupied.push(i);
+    }
+    return { nx, ny, nz, voxelSize, data: filled, occupied };
+  };
+
+  const voxelizeBox = (dims, voxelSize) => {
+    const nx = Math.max(1, Math.ceil(dims.x / voxelSize));
+    const ny = Math.max(1, Math.ceil(dims.y / voxelSize));
+    const nz = Math.max(1, Math.ceil(dims.z / voxelSize));
+    const data = new Uint8Array(nx * ny * nz);
+    data.fill(1);
+    return createVoxelGrid(nx, ny, nz, voxelSize, data);
+  };
+
+  const triBoxOverlap = (boxcenter, boxhalfsize, triverts) => {
+    const v0 = [
+      triverts[0][0] - boxcenter[0],
+      triverts[0][1] - boxcenter[1],
+      triverts[0][2] - boxcenter[2]
+    ];
+    const v1 = [
+      triverts[1][0] - boxcenter[0],
+      triverts[1][1] - boxcenter[1],
+      triverts[1][2] - boxcenter[2]
+    ];
+    const v2 = [
+      triverts[2][0] - boxcenter[0],
+      triverts[2][1] - boxcenter[1],
+      triverts[2][2] - boxcenter[2]
+    ];
+
+    const e0 = [v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]];
+    const e1 = [v2[0] - v1[0], v2[1] - v1[1], v2[2] - v1[2]];
+    const e2 = [v0[0] - v2[0], v0[1] - v2[1], v0[2] - v2[2]];
+
+    const fex = Math.abs(e0[0]);
+    const fey = Math.abs(e0[1]);
+    const fez = Math.abs(e0[2]);
+
+    const axisTest = (a, b, fa, fb, v0, v1, v2, half) => {
+      const p0 = a * v0[1] - b * v0[2];
+      const p1 = a * v1[1] - b * v1[2];
+      const p2 = a * v2[1] - b * v2[2];
+      const min = Math.min(p0, p1, p2);
+      const max = Math.max(p0, p1, p2);
+      const rad = fa * half[1] + fb * half[2];
+      return !(min > rad || max < -rad);
+    };
+
+    if (!axisTest(e0[2], e0[1], fez, fey, v0, v1, v2, boxhalfsize)) return false;
+    if (!axisTest(e0[2], e0[0], fez, fex, v0, v1, v2, boxhalfsize)) return false;
+    if (!axisTest(e0[1], e0[0], fey, fex, v0, v1, v2, boxhalfsize)) return false;
+
+    const fex1 = Math.abs(e1[0]);
+    const fey1 = Math.abs(e1[1]);
+    const fez1 = Math.abs(e1[2]);
+    if (!axisTest(e1[2], e1[1], fez1, fey1, v0, v1, v2, boxhalfsize)) return false;
+    if (!axisTest(e1[2], e1[0], fez1, fex1, v0, v1, v2, boxhalfsize)) return false;
+    if (!axisTest(e1[1], e1[0], fey1, fex1, v0, v1, v2, boxhalfsize)) return false;
+
+    const fex2 = Math.abs(e2[0]);
+    const fey2 = Math.abs(e2[1]);
+    const fez2 = Math.abs(e2[2]);
+    if (!axisTest(e2[2], e2[1], fez2, fey2, v0, v1, v2, boxhalfsize)) return false;
+    if (!axisTest(e2[2], e2[0], fez2, fex2, v0, v1, v2, boxhalfsize)) return false;
+    if (!axisTest(e2[1], e2[0], fey2, fex2, v0, v1, v2, boxhalfsize)) return false;
+
+    const minX = Math.min(v0[0], v1[0], v2[0]);
+    const maxX = Math.max(v0[0], v1[0], v2[0]);
+    if (minX > boxhalfsize[0] || maxX < -boxhalfsize[0]) return false;
+    const minY = Math.min(v0[1], v1[1], v2[1]);
+    const maxY = Math.max(v0[1], v1[1], v2[1]);
+    if (minY > boxhalfsize[1] || maxY < -boxhalfsize[1]) return false;
+    const minZ = Math.min(v0[2], v1[2], v2[2]);
+    const maxZ = Math.max(v0[2], v1[2], v2[2]);
+    if (minZ > boxhalfsize[2] || maxZ < -boxhalfsize[2]) return false;
+
+    const normal = [
+      e0[1] * e1[2] - e0[2] * e1[1],
+      e0[2] * e1[0] - e0[0] * e1[2],
+      e0[0] * e1[1] - e0[1] * e1[0]
+    ];
+
+    const d = -(normal[0] * v0[0] + normal[1] * v0[1] + normal[2] * v0[2]);
+    const r = boxhalfsize[0] * Math.abs(normal[0]) +
+      boxhalfsize[1] * Math.abs(normal[1]) +
+      boxhalfsize[2] * Math.abs(normal[2]);
+    const s = normal[0] * boxcenter[0] + normal[1] * boxcenter[1] + normal[2] * boxcenter[2] + d;
+    return Math.abs(s) <= r;
+  };
+
+  const voxelizeMesh = (geometry, voxelSize) => {
+    const geo = geometry.clone();
+    geo.computeBoundingBox();
+    const bbox = geo.boundingBox;
+    const size = new THREE.Vector3();
+    bbox.getSize(size);
+    const nx = Math.max(1, Math.ceil(size.x / voxelSize));
+    const ny = Math.max(1, Math.ceil(size.y / voxelSize));
+    const nz = Math.max(1, Math.ceil(size.z / voxelSize));
+    const data = new Uint8Array(nx * ny * nz);
+    const pos = geo.attributes.position.array;
+    const min = bbox.min;
+
+    for (let i = 0; i < pos.length; i += 9) {
+      const v0 = [pos[i] - min.x, pos[i + 1] - min.y, pos[i + 2] - min.z];
+      const v1 = [pos[i + 3] - min.x, pos[i + 4] - min.y, pos[i + 5] - min.z];
+      const v2 = [pos[i + 6] - min.x, pos[i + 7] - min.y, pos[i + 8] - min.z];
+      const triMin = [
+        Math.min(v0[0], v1[0], v2[0]),
+        Math.min(v0[1], v1[1], v2[1]),
+        Math.min(v0[2], v1[2], v2[2])
+      ];
+      const triMax = [
+        Math.max(v0[0], v1[0], v2[0]),
+        Math.max(v0[1], v1[1], v2[1]),
+        Math.max(v0[2], v1[2], v2[2])
+      ];
+      const minX = Math.max(0, Math.floor(triMin[0] / voxelSize));
+      const minY = Math.max(0, Math.floor(triMin[1] / voxelSize));
+      const minZ = Math.max(0, Math.floor(triMin[2] / voxelSize));
+      const maxX = Math.min(nx - 1, Math.floor(triMax[0] / voxelSize));
+      const maxY = Math.min(ny - 1, Math.floor(triMax[1] / voxelSize));
+      const maxZ = Math.min(nz - 1, Math.floor(triMax[2] / voxelSize));
+      for (let x = minX; x <= maxX; x++) {
+        for (let y = minY; y <= maxY; y++) {
+          for (let z = minZ; z <= maxZ; z++) {
+            const center = [
+              (x + 0.5) * voxelSize,
+              (y + 0.5) * voxelSize,
+              (z + 0.5) * voxelSize
+            ];
+            const half = [voxelSize / 2, voxelSize / 2, voxelSize / 2];
+            if (triBoxOverlap(center, half, [v0, v1, v2])) {
+              const idx = x + nx * (y + ny * z);
+              data[idx] = 1;
+            }
+          }
+        }
+      }
+    }
+
+    const dilated = data.slice();
+    const neighborOffsets = [-1, 0, 1];
+    for (let x = 0; x < nx; x++) {
+      for (let y = 0; y < ny; y++) {
+        for (let z = 0; z < nz; z++) {
+          const idx = x + nx * (y + ny * z);
+          if (!data[idx]) continue;
+          neighborOffsets.forEach(dx => {
+            neighborOffsets.forEach(dy => {
+              neighborOffsets.forEach(dz => {
+                const nxp = x + dx;
+                const nyp = y + dy;
+                const nzp = z + dz;
+                if (nxp < 0 || nyp < 0 || nzp < 0 || nxp >= nx || nyp >= ny || nzp >= nz) return;
+                const nIdx = nxp + nx * (nyp + ny * nzp);
+                dilated[nIdx] = 1;
+              });
+            });
+          });
+        }
+      }
+    }
+
+    return createVoxelGrid(nx, ny, nz, voxelSize, dilated);
+  };
+
+  const rotateVoxelGridY = (grid, rotation) => {
+    const rot = ((rotation % 360) + 360) % 360;
+    if (rot === 0) return grid;
+    const { nx, ny, nz, voxelSize, data } = grid;
+    let outNx = nx;
+    let outNz = nz;
+    if (rot === 90 || rot === 270) {
+      outNx = nz;
+      outNz = nx;
+    }
+    const outData = new Uint8Array(outNx * ny * outNz);
+    for (let x = 0; x < nx; x++) {
+      for (let y = 0; y < ny; y++) {
+        for (let z = 0; z < nz; z++) {
+          const idx = x + nx * (y + ny * z);
+          if (!data[idx]) continue;
+          let rx = x;
+          let rz = z;
+          if (rot === 90) {
+            rx = nz - 1 - z;
+            rz = x;
+          } else if (rot === 180) {
+            rx = nx - 1 - x;
+            rz = nz - 1 - z;
+          } else if (rot === 270) {
+            rx = z;
+            rz = nx - 1 - x;
+          }
+          const outIdx = rx + outNx * (y + ny * rz);
+          outData[outIdx] = 1;
+        }
+      }
+    }
+    return createVoxelGrid(outNx, ny, outNz, voxelSize, outData);
+  };
+
+  const rotateVoxelGridVertical = (grid) => {
+    const { nx, ny, nz, voxelSize, data } = grid;
+    const outData = new Uint8Array(nx * nz * ny);
+    for (let x = 0; x < nx; x++) {
+      for (let y = 0; y < ny; y++) {
+        for (let z = 0; z < nz; z++) {
+          const idx = x + nx * (y + ny * z);
+          if (!data[idx]) continue;
+          const ry = z;
+          const rz = ny - 1 - y;
+          const outIdx = x + nx * (ry + nz * rz);
+          outData[outIdx] = 1;
+        }
+      }
+    }
+    return createVoxelGrid(nx, nz, ny, voxelSize, outData);
+  };
+
+  const rotateVoxelGrid = (grid, rotation, vertical) => {
+    let rotated = grid;
+    if (vertical) {
+      rotated = rotateVoxelGridVertical(rotated);
+    }
+    return rotateVoxelGridY(rotated, rotation);
+  };
+
+  const testVoxelFit = (grid, worldGrid, pos, dims) => {
+    const baseX = Math.floor((pos.x - dims.x / 2) / voxelSize);
+    const baseY = Math.floor((pos.y - dims.y / 2) / voxelSize);
+    const baseZ = Math.floor((pos.z - dims.z / 2) / voxelSize);
+    const { nx, ny, nz, data } = grid;
+    const { nx: wNx, ny: wNy, nz: wNz, data: wData } = worldGrid;
+    for (let i = 0; i < grid.occupied.length; i++) {
+      const idx = grid.occupied[i];
+      const z = Math.floor(idx / (nx * ny));
+      const y = Math.floor((idx - z * nx * ny) / nx);
+      const x = idx - z * nx * ny - y * nx;
+      const wx = baseX + x;
+      const wy = baseY + y;
+      const wz = baseZ + z;
+      if (wx < 0 || wy < 0 || wz < 0 || wx >= wNx || wy >= wNy || wz >= wNz) {
+        return false;
+      }
+      const wIdx = wx + wNx * (wy + wNy * wz);
+      if (wData[wIdx]) return false;
+    }
+    return true;
+  };
+
+  const stampVoxels = (grid, worldGrid, pos, dims) => {
+    const baseX = Math.floor((pos.x - dims.x / 2) / voxelSize);
+    const baseY = Math.floor((pos.y - dims.y / 2) / voxelSize);
+    const baseZ = Math.floor((pos.z - dims.z / 2) / voxelSize);
+    const { nx, ny, nz } = grid;
+    const { nx: wNx, ny: wNy, data: wData } = worldGrid;
+    for (let i = 0; i < grid.occupied.length; i++) {
+      const idx = grid.occupied[i];
+      const z = Math.floor(idx / (nx * ny));
+      const y = Math.floor((idx - z * nx * ny) / nx);
+      const x = idx - z * nx * ny - y * nx;
+      const wx = baseX + x;
+      const wy = baseY + y;
+      const wz = baseZ + z;
+      if (wx < 0 || wy < 0 || wz < 0 || wx >= wNx || wy >= wNy || wz >= worldGrid.nz) continue;
+      const wIdx = wx + wNx * (wy + wNy * wz);
+      wData[wIdx] = 1;
+    }
+  };
+
+  const getItemDims = (item) => {
+    const stl = loadedMeshes[item.stlKey];
+    if (stl && stl.dims) return { x: stl.dims.x, y: stl.dims.y, z: stl.dims.z };
+    return { x: item.width, y: item.height, z: item.length };
+  };
+
+  const getItemVoxelGrid = (item, rotation, vertical) => {
+    const stl = loadedMeshes[item.stlKey];
+    if (stl && stl.voxelGrid) {
+      return rotateVoxelGrid(stl.voxelGrid, rotation, vertical);
+    }
+    const key = `box:${item.width}x${item.height}x${item.length}`;
+    const baseGrid = voxelCache[key] || voxelizeBox({ x: item.width, y: item.height, z: item.length }, voxelSize);
+    if (!voxelCache[key]) {
+      setVoxelCache(prev => ({ ...prev, [key]: baseGrid }));
+    }
+    return rotateVoxelGrid(baseGrid, rotation, vertical);
+  };
+
+  const createPalletVoxelGrid = () => {
+    const nx = Math.max(1, Math.ceil(config.palletWidth / voxelSize));
+    const ny = Math.max(1, Math.ceil(config.maxHeight / voxelSize));
+    const nz = Math.max(1, Math.ceil(config.palletLength / voxelSize));
+    return createVoxelGrid(nx, ny, nz, voxelSize);
+  };
+
+  const loadStlFile = (file, stlKey) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const loader = new THREE.STLLoader();
+        const geometry = loader.parse(reader.result);
+        const scale = stlUnits === 'mm' ? 1 / 25.4 : 1;
+        geometry.scale(scale, scale, scale);
+        geometry.computeBoundingBox();
+        const bbox = geometry.boundingBox;
+        const center = new THREE.Vector3();
+        bbox.getCenter(center);
+        geometry.translate(-center.x, -center.y, -center.z);
+        geometry.computeBoundingBox();
+        const centeredBox = geometry.boundingBox;
+        const dims = {
+          x: centeredBox.max.x - centeredBox.min.x,
+          y: centeredBox.max.y - centeredBox.min.y,
+          z: centeredBox.max.z - centeredBox.min.z
+        };
+        const voxelGrid = voxelizeMesh(geometry, voxelSize);
+        resolve({ stlKey, geometry, dims, voxelGrid });
+      } catch (err) {
+        reject(err);
+      }
+    };
+    reader.onerror = () => reject(new Error('Failed to read STL'));
+    reader.readAsArrayBuffer(file);
+  });
+
+  useEffect(() => {
+    setLoadedMeshes({});
+    setVoxelCache({});
+  }, [stlUnits]);
+
+  useEffect(() => {
+    if (bomItems.length === 0) {
+      setStlLoadStatus({ loaded: 0, total: 0, missing: [] });
+      return;
+    }
+    let isCancelled = false;
+    const requiredKeys = Array.from(new Set(bomItems.map(item => item.stlKey)));
+    const missing = requiredKeys.filter(key => !stlFiles[key]);
+    setStlLoadStatus({ loaded: 0, total: requiredKeys.length, missing });
+
+    const loadAll = async () => {
+      let loadedCount = 0;
+      const nextLoaded = {};
+      for (const key of requiredKeys) {
+        if (!stlFiles[key]) continue;
+        if (loadedMeshes[key]) {
+          loadedCount += 1;
+          continue;
+        }
+        try {
+          const result = await loadStlFile(stlFiles[key], key);
+          nextLoaded[key] = result;
+          loadedCount += 1;
+          if (!isCancelled) {
+            setStlLoadStatus(prev => ({ ...prev, loaded: loadedCount }));
+          }
+        } catch (err) {
+          missing.push(key);
+          if (!isCancelled) {
+            setStlLoadStatus(prev => ({ ...prev, missing: Array.from(new Set(missing)) }));
+          }
+        }
+      }
+      if (!isCancelled && Object.keys(nextLoaded).length > 0) {
+        setLoadedMeshes(prev => ({ ...prev, ...nextLoaded }));
+        setVoxelCache(prev => {
+          const updated = { ...prev };
+          Object.entries(nextLoaded).forEach(([key, data]) => {
+            updated[`stl:${key}`] = data.voxelGrid;
+          });
+          return updated;
+        });
+      }
+    };
+    loadAll();
+    return () => { isCancelled = true; };
+  }, [bomItems, stlFiles, stlUnits]);
+
+  useEffect(() => {
+    if (bomItems.length === 0) return;
+    setBomItems(prev => prev.map(item => ({
+      ...item,
+      stlFound: Boolean(stlFiles[item.stlKey])
+    })));
+  }, [stlFiles]);
 
   // -------------------------------------------------------------------------
   // 2. FRAMING GENERATOR (The Wood Structure)
@@ -242,14 +685,15 @@ const PalletOptimizer = () => {
 
   // Calculate the preferred orientation for sorting/stacking decisions
   const getPreferredOrientation = (item) => {
-    let dims = { x: item.width, y: item.height, z: item.length };
+    const baseDims = getItemDims(item);
+    let dims = { x: baseDims.x, y: baseDims.y, z: baseDims.z };
     let vertical = false;
 
-    if (config.allowVertical && item.length < config.maxHeight && item.length < 90) {
-      dims = { x: item.width, y: item.length, z: item.height };
+    if (config.allowVertical && dims.z < config.maxHeight && dims.z < 90) {
+      dims = { x: baseDims.x, y: baseDims.z, z: baseDims.y };
       vertical = true;
-    } else if (item.width > item.height) {
-      dims = { x: item.height, y: item.width, z: item.length };
+    } else if (baseDims.x > baseDims.y) {
+      dims = { x: baseDims.y, y: baseDims.x, z: baseDims.z };
     }
 
     return { dims, vertical };
@@ -272,10 +716,12 @@ const PalletOptimizer = () => {
       if (aLength !== bLength) return bLength - aLength;
       const weightDelta = b.weight - a.weight;
       if (Math.abs(weightDelta) > 5) return weightDelta;
-      const aVolume = a.length * a.width * a.height;
-      const bVolume = b.length * b.width * b.height;
+      const aBase = getItemDims(a);
+      const bBase = getItemDims(b);
+      const aVolume = aBase.x * aBase.y * aBase.z;
+      const bVolume = bBase.x * bBase.y * bBase.z;
       if (bVolume !== aVolume) return bVolume - aVolume;
-      return b.length - a.length;
+      return bOrientation.dims.z - aOrientation.dims.z;
     });
 
     const newPallets = [];
@@ -291,7 +737,8 @@ const PalletOptimizer = () => {
         woodFrames: [],
         totalWeight: 0,
         currentHeight: 0,
-        woodUsage: 0
+        woodUsage: 0,
+        voxelGrid: createPalletVoxelGrid()
       };
       const frameRegistry = new Set();
 
@@ -337,10 +784,12 @@ const PalletOptimizer = () => {
             if (aLength !== bLength) return bLength - aLength;
             const weightDelta = b.item.weight - a.item.weight;
             if (Math.abs(weightDelta) > 5) return weightDelta;
-            const aVolume = a.item.length * a.item.width * a.item.height;
-            const bVolume = b.item.length * b.item.width * b.item.height;
+            const aBase = getItemDims(a.item);
+            const bBase = getItemDims(b.item);
+            const aVolume = aBase.x * aBase.y * aBase.z;
+            const bVolume = bBase.x * bBase.y * bBase.z;
             if (bVolume !== aVolume) return bVolume - aVolume;
-            return b.item.length - a.item.length;
+            return bOrientation.dims.z - aOrientation.dims.z;
           });
 
         // Try to fill a row with items from the sorted queue
@@ -402,7 +851,8 @@ const PalletOptimizer = () => {
           const frontZoneCenter = (frontZoneStart + frontZoneEnd) / 2;
           let currentX = startX;
 
-          rowItems.forEach((ri, idx) => {
+          let placementFailed = false;
+          for (const ri of rowItems) {
             let itemX = currentX;
             if (!ri.vertical) {
                 itemX += config.lumberWidth; 
@@ -413,13 +863,25 @@ const PalletOptimizer = () => {
             const posZ = ri.vertical
               ? config.palletLength - config.safetyGap - (ri.dims.z / 2)
               : frontZoneCenter; 
+            const rotationYDegrees = 0;
+            const rotationYRadians = THREE.MathUtils.degToRad(rotationYDegrees);
+            const voxelGrid = getItemVoxelGrid(ri, rotationYDegrees, ri.vertical);
+            const fits = testVoxelFit(voxelGrid, pallet.voxelGrid, { x: posX, y: posY, z: posZ }, ri.dims);
+            if (!fits) {
+              setErrors([`No placement possible for ${ri.itemNumber}. Check STL collision or pallet limits.`]);
+              placementFailed = true;
+              break;
+            }
 
             pallet.items.push({
               ...sortedQueue[ri.index],
               position: { x: posX, y: posY, z: posZ },
-              rotation: { x: 0, y: 0, z: 0 },
-              finalDims: ri.dims
+              rotation: { x: 0, y: rotationYRadians, z: 0 },
+              finalDims: ri.dims,
+              hasStl: Boolean(loadedMeshes[ri.stlKey]),
+              vertical: ri.vertical
             });
+            stampVoxels(voxelGrid, pallet.voxelGrid, { x: posX, y: posY, z: posZ }, ri.dims);
 
             // GENERATE FRAMING (Pockets)
             if (!ri.vertical) {
@@ -549,7 +1011,8 @@ const PalletOptimizer = () => {
             } else {
                 currentX += ri.dims.x + 0.5;
             }
-          });
+          }
+          if (placementFailed) return;
 
           // Update layer height depending on row type
           if (isVerticalRow) {
@@ -600,6 +1063,7 @@ const PalletOptimizer = () => {
 
     // Commit results to state
     setPallets(newPallets);
+    setPalletVoxelGrid(newPallets.map(p => p.voxelGrid));
     if(newPallets.length > 0) setCurrentPalletView(0);
   };
 
@@ -608,6 +1072,8 @@ const PalletOptimizer = () => {
     const configChanged = JSON.stringify(config) !== JSON.stringify(lastRunConfig);
     setIsConfigDirty(configChanged);
   }, [config, lastRunConfig]);
+
+  const missingStlSet = new Set(stlLoadStatus.missing);
 
   // -------------------------------------------------------------------------
   // 4. THREE.JS RENDERING
@@ -654,23 +1120,79 @@ const PalletOptimizer = () => {
 
     // Render Items
     pallet.items.forEach((item) => {
-      const geo = new THREE.BoxGeometry(item.finalDims.x, item.finalDims.y, item.finalDims.z);
-      const mat = new THREE.MeshStandardMaterial({ 
-        color: colorPalette[item.colorIndex],
-        roughness: 0.7,
-        metalness: 0.1
-      });
-      const mesh = new THREE.Mesh(geo, mat);
-      mesh.position.set(item.position.x, item.position.y, item.position.z);
-      mesh.castShadow = true;
-      mesh.receiveShadow = true;
-      mesh.userData = { item };
-      scene.add(mesh);
+      const dims = item.finalDims;
+      const stlData = loadedMeshes[item.stlKey];
+      const shouldRenderStl = renderStlMeshes && !renderProxyBoxes && item.hasStl && stlData;
+      const shouldRenderBox = renderProxyBoxes || !shouldRenderStl;
 
-      const edges = new THREE.EdgesGeometry(geo);
-      const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x000000, opacity: 0.2, transparent: true }));
-      line.position.copy(mesh.position);
-      scene.add(line);
+      if (shouldRenderStl) {
+        const stlMat = new THREE.MeshStandardMaterial({
+          color: colorPalette[item.colorIndex],
+          roughness: 0.6,
+          metalness: 0.1
+        });
+        const stlMesh = new THREE.Mesh(stlData.geometry.clone(), stlMat);
+        stlMesh.position.set(item.position.x, item.position.y, item.position.z);
+        const verticalRotation = item.vertical ? -Math.PI / 2 : 0;
+        stlMesh.rotation.set(verticalRotation, item.rotation.y, 0);
+        stlMesh.castShadow = true;
+        stlMesh.receiveShadow = true;
+        stlMesh.userData = { item };
+        scene.add(stlMesh);
+      }
+
+      if (shouldRenderBox) {
+        const geo = new THREE.BoxGeometry(dims.x, dims.y, dims.z);
+        const mat = new THREE.MeshStandardMaterial({
+          color: colorPalette[item.colorIndex],
+          roughness: 0.7,
+          metalness: 0.1
+        });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.set(item.position.x, item.position.y, item.position.z);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        mesh.userData = { item };
+        scene.add(mesh);
+
+        const edges = new THREE.EdgesGeometry(geo);
+        const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x000000, opacity: 0.2, transparent: true }));
+        line.position.copy(mesh.position);
+        scene.add(line);
+      }
+
+      if (showPlacementBoxes) {
+        const boxGeo = new THREE.BoxGeometry(dims.x, dims.y, dims.z);
+        const boxMat = new THREE.MeshBasicMaterial({ color: 0x22d3ee, transparent: true, opacity: 0.15 });
+        const boxMesh = new THREE.Mesh(boxGeo, boxMat);
+        boxMesh.position.set(item.position.x, item.position.y, item.position.z);
+        scene.add(boxMesh);
+      }
+
+      if (showVoxelDebug && item.hasStl) {
+        const debugGrid = getItemVoxelGrid(item, item.rotation.y * (180 / Math.PI), item.vertical);
+        const maxInstances = Math.min(debugGrid.occupied.length, 5000);
+        const cubeGeo = new THREE.BoxGeometry(voxelSize, voxelSize, voxelSize);
+        const cubeMat = new THREE.MeshBasicMaterial({ color: 0xff00ff, transparent: true, opacity: 0.35 });
+        const instanced = new THREE.InstancedMesh(cubeGeo, cubeMat, maxInstances);
+        const baseX = item.position.x - dims.x / 2;
+        const baseY = item.position.y - dims.y / 2;
+        const baseZ = item.position.z - dims.z / 2;
+        for (let i = 0; i < maxInstances; i++) {
+          const idx = debugGrid.occupied[i];
+          const z = Math.floor(idx / (debugGrid.nx * debugGrid.ny));
+          const y = Math.floor((idx - z * debugGrid.nx * debugGrid.ny) / debugGrid.nx);
+          const x = idx - z * debugGrid.nx * debugGrid.ny - y * debugGrid.nx;
+          const matrix = new THREE.Matrix4();
+          matrix.setPosition(
+            baseX + (x + 0.5) * voxelSize,
+            baseY + (y + 0.5) * voxelSize,
+            baseZ + (z + 0.5) * voxelSize
+          );
+          instanced.setMatrixAt(i, matrix);
+        }
+        scene.add(instanced);
+      }
     });
 
     // Render Wood Framing
@@ -739,7 +1261,7 @@ const PalletOptimizer = () => {
         window.removeEventListener('mouseup', onMouseUp);
         window.removeEventListener('mousemove', onMouseMove);
     };
-  }, [pallets, currentPalletView, config]);
+  }, [pallets, currentPalletView, config, loadedMeshes, renderStlMeshes, renderProxyBoxes, showPlacementBoxes, showVoxelDebug]);
 
   return (
     <div className="flex flex-col h-screen bg-gray-50 text-gray-800 font-sans">
@@ -834,14 +1356,86 @@ const PalletOptimizer = () => {
                 )}
             </div>
 
-            {/* UPLOAD */}
-            <div className="p-4 border-b bg-gray-50">
+            {/* STL INPUT */}
+            <div className="p-4 border-b bg-gray-50 space-y-3">
+                <h2 className="text-xs font-bold text-gray-400 uppercase tracking-wider">STL Input</h2>
                 <label className="flex flex-col items-center justify-center w-full h-20 border-2 border-gray-300 border-dashed rounded-lg cursor-pointer bg-white hover:bg-gray-50 transition-colors">
                     <div className="flex flex-col items-center justify-center pt-2 pb-2">
                         <Upload size={20} className="text-gray-400 mb-1" />
-                        <p className="text-[10px] text-gray-500">Upload CSV (H, W, L, Wgt, Qty)</p>
+                        <p className="text-[10px] text-gray-500">Select STL Folder</p>
+                    </div>
+                    <input type="file" className="hidden" accept=".stl" multiple webkitdirectory="true" directory="true" onChange={loadSTLFolder} />
+                </label>
+                <div className="text-[10px] text-gray-500">
+                    Loaded {stlLoadStatus.loaded} / {stlLoadStatus.total} required STLs
+                </div>
+                {stlLoadStatus.missing.length > 0 && (
+                  <div className="text-[10px] text-amber-700">
+                    Missing: {stlLoadStatus.missing.join(', ')}
+                  </div>
+                )}
+            </div>
+
+            {/* BOM UPLOAD */}
+            <div className="p-4 border-b bg-white space-y-3">
+                <h2 className="text-xs font-bold text-gray-400 uppercase tracking-wider">BOM Upload</h2>
+                <label className="flex flex-col items-center justify-center w-full h-20 border-2 border-gray-300 border-dashed rounded-lg cursor-pointer bg-white hover:bg-gray-50 transition-colors">
+                    <div className="flex flex-col items-center justify-center pt-2 pb-2">
+                        <Upload size={20} className="text-gray-400 mb-1" />
+                        <p className="text-[10px] text-gray-500">Upload CSV (number, H, W, L, Weight, QTY)</p>
                     </div>
                     <input type="file" className="hidden" accept=".csv" onChange={handleFileUpload} />
+                </label>
+                {bomItems.length > 0 && (
+                  <div className="space-y-1 text-[10px] text-gray-600">
+                    {bomItems.map((item, idx) => {
+                      const isMissing = missingStlSet.has(item.stlKey) || !item.stlFound;
+                      return (
+                        <div key={idx} className="flex justify-between items-center bg-gray-50 border rounded px-2 py-1">
+                          <span>{item.itemNumber}</span>
+                          <span className="text-gray-400">x{item.qty}</span>
+                          <span className={`px-2 py-0.5 rounded ${isMissing ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                            {isMissing ? 'Missing STL' : 'STL Found'}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+            </div>
+
+            {/* UNITS */}
+            <div className="p-4 border-b bg-gray-50 space-y-2">
+                <h2 className="text-xs font-bold text-gray-400 uppercase tracking-wider">Units</h2>
+                <label className="text-xs font-medium text-gray-600">STL Units</label>
+                <select
+                  value={stlUnits}
+                  onChange={e => setStlUnits(e.target.value)}
+                  className="w-full mt-1 px-2 py-1 text-sm border rounded focus:ring-2 focus:ring-blue-500 outline-none"
+                >
+                  <option value="in">inches</option>
+                  <option value="mm">mm</option>
+                </select>
+            </div>
+
+            {/* DISPLAY */}
+            <div className="p-4 border-b bg-white space-y-2">
+                <h2 className="text-xs font-bold text-gray-400 uppercase tracking-wider">Display</h2>
+                <label className="flex items-center gap-2 text-xs text-gray-600">
+                  <input type="checkbox" checked={renderStlMeshes} onChange={e => setRenderStlMeshes(e.target.checked)} />
+                  Render STL meshes
+                </label>
+                <label className="flex items-center gap-2 text-xs text-gray-600">
+                  <input type="checkbox" checked={renderProxyBoxes} onChange={e => setRenderProxyBoxes(e.target.checked)} />
+                  Render proxy boxes only
+                </label>
+                <label className="flex items-center gap-2 text-xs text-gray-600">
+                  <input type="checkbox" checked={showPlacementBoxes} onChange={e => setShowPlacementBoxes(e.target.checked)} />
+                  Show placement boxes
+                </label>
+                <label className="flex items-center gap-2 text-xs text-gray-600">
+                  <input type="checkbox" checked={showVoxelDebug} onChange={e => setShowVoxelDebug(e.target.checked)} />
+                  Debug: show voxel cubes
                 </label>
             </div>
 
