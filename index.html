@@ -115,6 +115,7 @@ const PalletOptimizer = () => {
   const [renderProxyBoxes, setRenderProxyBoxes] = useState(false);
   const [showPlacementBoxes, setShowPlacementBoxes] = useState(true);
   const [showVoxelDebug, setShowVoxelDebug] = useState(false);
+  const [normalizeStlToBOM, setNormalizeStlToBOM] = useState(true);
   
   // User-controlled configuration for pallet constraints and framing
   const [config, setConfig] = useState({
@@ -519,13 +520,15 @@ const PalletOptimizer = () => {
 
   const getItemDims = (item) => {
     const stl = loadedMeshes[item.stlKey];
-    if (stl && stl.dims) return { x: stl.dims.x, y: stl.dims.y, z: stl.dims.z };
+    if (stl && stl.dims && !normalizeStlToBOM) {
+      return { x: stl.dims.x, y: stl.dims.y, z: stl.dims.z };
+    }
     return { x: item.width, y: item.height, z: item.length };
   };
 
   const getItemVoxelGrid = (item, rotation, vertical) => {
     const stl = loadedMeshes[item.stlKey];
-    if (stl && stl.voxelGrid) {
+    if (stl && stl.voxelGrid && !normalizeStlToBOM) {
       return rotateVoxelGrid(stl.voxelGrid, rotation, vertical);
     }
     const key = `box:${item.width}x${item.height}x${item.length}`;
@@ -1132,6 +1135,12 @@ const PalletOptimizer = () => {
           metalness: 0.1
         });
         const stlMesh = new THREE.Mesh(stlData.geometry.clone(), stlMat);
+        if (normalizeStlToBOM && stlData.dims) {
+          const scaleX = stlData.dims.x ? dims.x / stlData.dims.x : 1;
+          const scaleY = stlData.dims.y ? dims.y / stlData.dims.y : 1;
+          const scaleZ = stlData.dims.z ? dims.z / stlData.dims.z : 1;
+          stlMesh.scale.set(scaleX, scaleY, scaleZ);
+        }
         stlMesh.position.set(item.position.x, item.position.y, item.position.z);
         const verticalRotation = item.vertical ? -Math.PI / 2 : 0;
         stlMesh.rotation.set(verticalRotation, item.rotation.y, 0);
@@ -1416,6 +1425,15 @@ const PalletOptimizer = () => {
                   <option value="in">inches</option>
                   <option value="mm">mm</option>
                 </select>
+                <label className="flex items-start gap-2 text-xs text-gray-600">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={normalizeStlToBOM}
+                    onChange={e => setNormalizeStlToBOM(e.target.checked)}
+                  />
+                  <span>Fit STL geometry to BOM dimensions for placement/rendering.</span>
+                </label>
             </div>
 
             {/* DISPLAY */}
