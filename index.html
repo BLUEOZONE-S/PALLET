@@ -121,6 +121,9 @@ const PalletOptimizer = () => {
   const [normalizeStlToBOM, setNormalizeStlToBOM] = useState(false);
   const [debugLogs, setDebugLogs] = useState([]);
   const [sidebarTab, setSidebarTab] = useState('controls');
+  const [isPhoneMode, setIsPhoneMode] = useState(false);
+  const [activePhonePanel, setActivePhonePanel] = useState(null);
+  const [isAutoRotate, setIsAutoRotate] = useState(false);
   const stlFilesAvailable = Object.keys(stlFiles).length > 0;
   const debugLogLimit = 200;
   const lastMissingKeyRef = useRef('');
@@ -145,7 +148,9 @@ const PalletOptimizer = () => {
   const mountRef = useRef(null);
   const sceneRef = useRef(null);
   const rendererRef = useRef(null);
+  const cameraRef = useRef(null);
   const cameraStateRef = useRef({ viewKey: null, position: null, target: null });
+  const autoRotateRef = useRef(isAutoRotate);
 
   // Consistent colors for items in the scene
   const colorPalette = [
@@ -1373,7 +1378,317 @@ const PalletOptimizer = () => {
     setIsConfigDirty(configChanged);
   }, [config, lastRunConfig]);
 
+  useEffect(() => {
+    autoRotateRef.current = isAutoRotate;
+  }, [isAutoRotate]);
+
   const missingStlSet = new Set(stlLoadStatus.missing);
+
+  const rotateCameraBy = useCallback((angle) => {
+    const camera = cameraRef.current;
+    if (!camera || !cameraStateRef.current?.target) return;
+    const target = new THREE.Vector3(
+      cameraStateRef.current.target.x,
+      cameraStateRef.current.target.y,
+      cameraStateRef.current.target.z
+    );
+    const offset = new THREE.Vector3().subVectors(camera.position, target);
+    const radius = offset.length();
+    const theta = Math.atan2(offset.x, offset.z) + angle;
+    const phi = Math.atan2(Math.sqrt(offset.x * offset.x + offset.z * offset.z), offset.y);
+    camera.position.x = target.x + radius * Math.sin(phi) * Math.sin(theta);
+    camera.position.y = target.y + radius * Math.cos(phi);
+    camera.position.z = target.z + radius * Math.sin(phi) * Math.cos(theta);
+    camera.lookAt(target);
+    cameraStateRef.current = {
+      viewKey: cameraStateRef.current.viewKey,
+      position: { x: camera.position.x, y: camera.position.y, z: camera.position.z },
+      target: { x: target.x, y: target.y, z: target.z }
+    };
+  }, []);
+
+  const panelChrome = isPhoneMode
+    ? 'rounded-2xl border border-white/60 bg-white/80 backdrop-blur shadow-lg'
+    : '';
+  const sectionChrome = (tone) => (isPhoneMode ? panelChrome : `border-b ${tone}`);
+
+  const configSection = (
+    <div className={`p-4 space-y-4 ${sectionChrome('bg-white')}`}>
+      <h2 className="text-xs font-bold text-gray-400 uppercase tracking-wider flex items-center gap-2"><Settings size={12}/> Pallet Configuration</h2>
+      
+      <div className="grid grid-cols-2 gap-3">
+          <div>
+              <label className="text-xs font-medium text-gray-600">Pallet Len (in)</label>
+              <input type="number" value={config.palletLength} onChange={e => setConfig({...config, palletLength: Number(e.target.value)})} className="w-full mt-1 px-2 py-1 text-sm border rounded focus:ring-2 focus:ring-blue-500 outline-none" />
+          </div>
+          <div>
+              <label className="text-xs font-medium text-gray-600">Pallet Wid (in)</label>
+              <input type="number" value={config.palletWidth} onChange={e => setConfig({...config, palletWidth: Number(e.target.value)})} className="w-full mt-1 px-2 py-1 text-sm border rounded focus:ring-2 focus:ring-blue-500 outline-none" />
+          </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+          <div>
+              <label className="text-xs font-medium text-gray-600 flex items-center gap-1"><ArrowUp size={10}/> Max Height</label>
+              <input type="number" value={config.maxHeight} onChange={e => setConfig({...config, maxHeight: Number(e.target.value)})} className="w-full mt-1 px-2 py-1 text-sm border rounded focus:ring-2 focus:ring-blue-500 outline-none" />
+          </div>
+          <div>
+              <label className="text-xs font-medium text-gray-600 flex items-center gap-1"><Scale size={10}/> Max Lbs</label>
+              <input type="number" value={config.maxWeight} onChange={e => setConfig({...config, maxWeight: Number(e.target.value)})} className="w-full mt-1 px-2 py-1 text-sm border rounded focus:ring-2 focus:ring-blue-500 outline-none" />
+          </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+          <div>
+               <label className="text-xs font-medium text-gray-600 flex items-center gap-1"><ShieldAlert size={10}/> Safety Gap</label>
+               <input type="number" step="0.5" value={config.safetyGap} onChange={e => setConfig({...config, safetyGap: Number(e.target.value)})} className="w-full mt-1 px-2 py-1 text-sm border rounded focus:ring-2 focus:ring-blue-500 outline-none" />
+          </div>
+          <div>
+              <label className="text-xs font-medium text-gray-600">Post Spacing</label>
+              <input type="number" value={config.framingSpacing} onChange={e => setConfig({...config, framingSpacing: Number(e.target.value)})} className="w-full mt-1 px-2 py-1 text-sm border rounded focus:ring-2 focus:ring-blue-500 outline-none" />
+          </div>
+      </div>
+
+      <div>
+          <label className="text-xs font-medium text-gray-600 flex items-center gap-1">Diagonal Bracing</label>
+          <select 
+              value={config.addBracing} 
+              onChange={e => setConfig({...config, addBracing: e.target.value === 'true'})}
+              className="w-full mt-1 px-2 py-1 text-sm border rounded focus:ring-2 focus:ring-blue-500 outline-none"
+          >
+              <option value="true">Yes - Add Structural Cross-Bracing</option>
+              <option value="false">No - Vertical Posts Only</option>
+          </select>
+      </div>
+      <div>
+          <label className="text-xs font-medium text-gray-600 flex items-center gap-1">Vertical Stacking</label>
+          <select 
+              value={config.allowVertical} 
+              onChange={e => setConfig({...config, allowVertical: e.target.value === 'true'})}
+              className="w-full mt-1 px-2 py-1 text-sm border rounded focus:ring-2 focus:ring-blue-500 outline-none"
+          >
+              <option value="true">Auto - Stand Short Items</option>
+              <option value="false">No - Always Lay Flat</option>
+          </select>
+      </div>
+      {isConfigDirty && (
+        <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-900">
+          Config changed. Click Refresh Preview to recalculate the stack.
+        </div>
+      )}
+    </div>
+  );
+
+  const stlSection = (
+    <div className={`p-4 space-y-3 ${sectionChrome('bg-gray-50')}`}>
+      <h2 className="text-xs font-bold text-gray-400 uppercase tracking-wider">STL Input</h2>
+      <label className="flex flex-col items-center justify-center w-full h-20 border-2 border-gray-300 border-dashed rounded-lg cursor-pointer bg-white hover:bg-gray-50 transition-colors">
+          <div className="flex flex-col items-center justify-center pt-2 pb-2">
+              <Upload size={20} className="text-gray-400 mb-1" />
+              <p className="text-[10px] text-gray-500">Select STL Folder</p>
+          </div>
+          <input type="file" className="hidden" accept=".stl" multiple webkitdirectory="true" directory="true" onChange={loadSTLFolder} />
+      </label>
+      <div className="text-[10px] text-gray-500">
+          {stlFilesAvailable
+            ? `Loaded ${stlLoadStatus.loaded} / ${stlLoadStatus.total} queued STLs`
+            : 'No STL folder selected (CSV-only mode).'}
+      </div>
+      <label className="flex items-center gap-2 text-xs text-gray-600">
+        <input
+          type="checkbox"
+          checked={useStlForCollisions}
+          onChange={e => setUseStlForCollisions(e.target.checked)}
+        />
+        Use STL geometry for collision checks (slower)
+      </label>
+      {stlFilesAvailable && stlLoadStatus.missing.length > 0 && (
+        <div className="text-[10px] text-amber-700">
+          Missing: {stlLoadStatus.missing.join(', ')}
+        </div>
+      )}
+    </div>
+  );
+
+  const bomSection = (
+    <div className={`p-4 space-y-3 ${sectionChrome('bg-white')}`}>
+      <h2 className="text-xs font-bold text-gray-400 uppercase tracking-wider">BOM Upload</h2>
+      <label className="flex flex-col items-center justify-center w-full h-20 border-2 border-gray-300 border-dashed rounded-lg cursor-pointer bg-white hover:bg-gray-50 transition-colors">
+          <div className="flex flex-col items-center justify-center pt-2 pb-2">
+              <Upload size={20} className="text-gray-400 mb-1" />
+              <p className="text-[10px] text-gray-500">Upload CSV (number, weight, qty; H/W/L optional if STL provided)</p>
+          </div>
+          <input type="file" className="hidden" accept=".csv" onChange={handleFileUpload} />
+      </label>
+      {bomItems.length > 0 && (
+        <div className="space-y-1 text-[10px] text-gray-600">
+          {bomItems.map((item, idx) => {
+            const csvDimsOk = hasValidCsvDims(item);
+            const stlMissing = stlFilesAvailable && (missingStlSet.has(item.stlKey) || !item.stlFound);
+            let statusText = 'CSV dims';
+            let statusClass = 'bg-slate-100 text-slate-600';
+            if (!csvDimsOk) {
+              statusText = stlMissing ? 'Missing STL' : 'STL required';
+              statusClass = stlMissing ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700';
+            } else if (stlFilesAvailable && item.stlFound && shouldUseStlGeometry) {
+              statusText = 'STL ready';
+              statusClass = 'bg-emerald-100 text-emerald-700';
+            }
+            return (
+              <div key={idx} className="flex justify-between items-center bg-gray-50 border rounded px-2 py-1">
+                <span>{item.itemNumber}</span>
+                <span className="text-gray-400">x{item.qty}</span>
+                <span className={`px-2 py-0.5 rounded ${statusClass}`}>
+                  {statusText}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+
+  const unitsSection = (
+    <div className={`p-4 space-y-2 ${sectionChrome('bg-gray-50')}`}>
+      <h2 className="text-xs font-bold text-gray-400 uppercase tracking-wider">Units</h2>
+      <label className="text-xs font-medium text-gray-600">STL Units</label>
+      <select
+        value={stlUnits}
+        onChange={e => setStlUnits(e.target.value)}
+        className="w-full mt-1 px-2 py-1 text-sm border rounded focus:ring-2 focus:ring-blue-500 outline-none"
+      >
+        <option value="in">inches</option>
+        <option value="mm">mm</option>
+      </select>
+      <label className="flex items-start gap-2 text-xs text-gray-600">
+        <input
+          type="checkbox"
+          className="mt-0.5"
+          checked={normalizeStlToBOM}
+          onChange={e => setNormalizeStlToBOM(e.target.checked)}
+        />
+        <span>Override STL dimensions with CSV values (debug only).</span>
+      </label>
+    </div>
+  );
+
+  const displaySection = (
+    <div className={`p-4 space-y-2 ${sectionChrome('bg-white')}`}>
+      <h2 className="text-xs font-bold text-gray-400 uppercase tracking-wider">Display</h2>
+      <label className="flex items-center gap-2 text-xs text-gray-600">
+        <input type="checkbox" checked={renderStlMeshes} onChange={e => setRenderStlMeshes(e.target.checked)} />
+        Render STL meshes (loads geometry)
+      </label>
+      <label className="flex items-center gap-2 text-xs text-gray-600">
+        <input type="checkbox" checked={renderProxyBoxes} onChange={e => setRenderProxyBoxes(e.target.checked)} />
+        Render proxy boxes only
+      </label>
+      <label className="flex items-center gap-2 text-xs text-gray-600">
+        <input type="checkbox" checked={showStlBounds} onChange={e => setShowStlBounds(e.target.checked)} />
+        Show STL bounding boxes
+      </label>
+      <label className="flex items-center gap-2 text-xs text-gray-600">
+        <input type="checkbox" checked={showPlacementBoxes} onChange={e => setShowPlacementBoxes(e.target.checked)} />
+        Show placement boxes
+      </label>
+      <label className="flex items-center gap-2 text-xs text-gray-600">
+        <input type="checkbox" checked={showDeadzoneBox} onChange={e => setShowDeadzoneBox(e.target.checked)} />
+        Show deadzone box (largest open volume)
+      </label>
+      <label className="flex items-center gap-2 text-xs text-gray-600">
+        <input type="checkbox" checked={showVoxelDebug} onChange={e => setShowVoxelDebug(e.target.checked)} />
+        Debug: show voxel cubes
+      </label>
+    </div>
+  );
+
+  const errorsSection = errors.length > 0 ? (
+    <div className={`p-4 ${sectionChrome('bg-red-50 border-red-100')} ${isPhoneMode ? 'bg-red-50/80' : ''}`}>
+      <div className="text-xs text-red-600 font-medium mb-1">Errors</div>
+      <ul className="list-disc list-inside text-[10px] text-red-500">
+          {errors.map((e,i) => <li key={i}>{e}</li>)}
+      </ul>
+    </div>
+  ) : null;
+
+  const manifestSection = (
+    <div className={`flex-1 p-4 overflow-y-auto ${sectionChrome('bg-white')}`}>
+      <h2 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Manifest</h2>
+      <div className="space-y-2">
+          {Array.from(new Set(items.map(i => i.itemNumber))).map((num, i) => {
+              const group = items.filter(x => x.itemNumber === num);
+              return (
+                  <div key={i} className="bg-white border rounded p-2 text-xs shadow-sm flex justify-between items-center">
+                      <span className="font-bold">{num}</span>
+                      <span className="bg-gray-100 px-2 py-0.5 rounded text-gray-500">x{group.length}</span>
+                  </div>
+              )
+          })}
+      </div>
+    </div>
+  );
+
+  const terminalSection = (
+    <div className={`flex-1 flex flex-col ${isPhoneMode ? 'rounded-2xl border border-white/60 bg-slate-900/95' : 'bg-slate-900'} text-slate-100`}>
+      <div className="p-3 border-b border-slate-800 flex items-center justify-between">
+          <div className="text-xs font-bold uppercase tracking-wider text-slate-300">Debug Terminal</div>
+          <button
+            onClick={() => setDebugLogs([])}
+            className="text-[10px] text-slate-400 hover:text-slate-200"
+          >
+            Clear
+          </button>
+      </div>
+      <div className="flex-1 overflow-y-auto px-3 py-2 font-mono text-[10px] space-y-1">
+          {debugLogs.length === 0 ? (
+            <div className="text-slate-500">No debug messages yet.</div>
+          ) : (
+            debugLogs.map(log => {
+              const levelClass = log.level === 'error'
+                ? 'text-red-300'
+                : log.level === 'warn'
+                  ? 'text-amber-300'
+                  : 'text-slate-200';
+              return (
+                <div key={log.id} className="flex gap-2">
+                  <span className="text-slate-500">{log.timestamp}</span>
+                  <span className={`uppercase ${levelClass}`}>{log.level}</span>
+                  <span className={levelClass}>{log.message}</span>
+                </div>
+              );
+            })
+          )}
+      </div>
+    </div>
+  );
+
+  const phonePanels = {
+    config: (
+      <div className="space-y-3">
+        {configSection}
+      </div>
+    ),
+    inputs: (
+      <div className="space-y-3">
+        {stlSection}
+        {bomSection}
+        {unitsSection}
+      </div>
+    ),
+    display: (
+      <div className="space-y-3">
+        {displaySection}
+      </div>
+    ),
+    manifest: (
+      <div className="space-y-3">
+        {errorsSection}
+        {manifestSection}
+      </div>
+    ),
+    terminal: terminalSection
+  };
 
   // -------------------------------------------------------------------------
   // 4. THREE.JS RENDERING
@@ -1424,11 +1739,13 @@ const PalletOptimizer = () => {
     }
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setSize(width, height);
     renderer.shadowMap.enabled = true;
     mountRef.current.innerHTML = '';
     mountRef.current.appendChild(renderer.domElement);
     rendererRef.current = renderer;
+    cameraRef.current = camera;
 
     // Lighting for readability
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
@@ -1610,13 +1927,79 @@ const PalletOptimizer = () => {
         };
     };
 
+    const onTouchStart = (e) => {
+        if (e.touches.length !== 1) return;
+        isDragging = true;
+        prevPos = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    };
+    const onTouchEnd = () => { isDragging = false; };
+    const onTouchMove = (e) => {
+        if (!isDragging || e.touches.length !== 1) return;
+        const touch = e.touches[0];
+        const dx = touch.clientX - prevPos.x;
+        const dy = touch.clientY - prevPos.y;
+        prevPos = { x: touch.clientX, y: touch.clientY };
+        const offset = new THREE.Vector3().subVectors(camera.position, target);
+        const theta = Math.atan2(offset.x, offset.z);
+        const phi = Math.atan2(Math.sqrt(offset.x*offset.x + offset.z*offset.z), offset.y);
+        const newTheta = theta - dx * 0.01;
+        const newPhi = Math.max(0.1, Math.min(Math.PI - 0.1, phi - dy * 0.01));
+        const radius = offset.length();
+        camera.position.x = target.x + radius * Math.sin(newPhi) * Math.sin(newTheta);
+        camera.position.y = target.y + radius * Math.cos(newPhi);
+        camera.position.z = target.z + radius * Math.sin(newPhi) * Math.cos(newTheta);
+        camera.lookAt(target);
+        cameraStateRef.current = {
+          viewKey,
+          position: { x: camera.position.x, y: camera.position.y, z: camera.position.z },
+          target: { x: target.x, y: target.y, z: target.z }
+        };
+    };
+
     renderer.domElement.addEventListener('mousedown', onMouseDown);
     window.addEventListener('mouseup', onMouseUp);
     window.addEventListener('mousemove', onMouseMove);
+    renderer.domElement.addEventListener('touchstart', onTouchStart, { passive: true });
+    renderer.domElement.addEventListener('touchend', onTouchEnd, { passive: true });
+    renderer.domElement.addEventListener('touchmove', onTouchMove, { passive: true });
+
+    const handleResize = () => {
+      if (!mountRef.current || !rendererRef.current || !cameraRef.current) return;
+      const newWidth = mountRef.current.clientWidth;
+      const newHeight = mountRef.current.clientHeight;
+      cameraRef.current.aspect = newWidth / newHeight;
+      cameraRef.current.updateProjectionMatrix();
+      rendererRef.current.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      rendererRef.current.setSize(newWidth, newHeight);
+    };
+    window.addEventListener('resize', handleResize);
 
     // Render loop
     const animate = () => {
       requestAnimationFrame(animate);
+      if (autoRotateRef.current && cameraRef.current) {
+        const targetRef = cameraStateRef.current.target;
+        if (targetRef) {
+          const target = new THREE.Vector3(targetRef.x, targetRef.y, targetRef.z);
+          const offset = new THREE.Vector3().subVectors(cameraRef.current.position, target);
+          const radius = offset.length();
+          const theta = Math.atan2(offset.x, offset.z) + 0.003;
+          const phi = Math.atan2(Math.sqrt(offset.x * offset.x + offset.z * offset.z), offset.y);
+          cameraRef.current.position.x = target.x + radius * Math.sin(phi) * Math.sin(theta);
+          cameraRef.current.position.y = target.y + radius * Math.cos(phi);
+          cameraRef.current.position.z = target.z + radius * Math.sin(phi) * Math.cos(theta);
+          cameraRef.current.lookAt(target);
+          cameraStateRef.current = {
+            viewKey,
+            position: {
+              x: cameraRef.current.position.x,
+              y: cameraRef.current.position.y,
+              z: cameraRef.current.position.z
+            },
+            target: { x: target.x, y: target.y, z: target.z }
+          };
+        }
+      }
       renderer.render(scene, camera);
     };
     animate();
@@ -1625,6 +2008,10 @@ const PalletOptimizer = () => {
         renderer.domElement.removeEventListener('mousedown', onMouseDown);
         window.removeEventListener('mouseup', onMouseUp);
         window.removeEventListener('mousemove', onMouseMove);
+        renderer.domElement.removeEventListener('touchstart', onTouchStart);
+        renderer.domElement.removeEventListener('touchend', onTouchEnd);
+        renderer.domElement.removeEventListener('touchmove', onTouchMove);
+        window.removeEventListener('resize', handleResize);
     };
   }, [
     pallets,
@@ -1636,12 +2023,13 @@ const PalletOptimizer = () => {
     showPlacementBoxes,
     showVoxelDebug,
     showStlBounds,
-    showDeadzoneBox
+    showDeadzoneBox,
+    isPhoneMode
   ]);
 
   return (
     <div className="flex flex-col h-screen bg-gray-50 text-gray-800 font-sans">
-      <header className="bg-white border-b px-6 py-4 flex justify-between items-center shadow-sm">
+      <header className="bg-white/90 backdrop-blur border-b px-4 py-3 md:px-6 md:py-4 flex flex-wrap gap-3 justify-between items-center shadow-sm">
         <div className="flex items-center gap-3">
             <div className="bg-orange-600 p-2 rounded-lg text-white"><Hammer size={24} /></div>
             <div>
@@ -1649,7 +2037,16 @@ const PalletOptimizer = () => {
                 <p className="text-xs text-gray-500">Auto-framing, wood calculation, and pipe stacking</p>
             </div>
         </div>
-        <div className="flex gap-3">
+        <div className="flex flex-wrap gap-3 items-center justify-end">
+             <button
+                onClick={() => {
+                  setIsPhoneMode(!isPhoneMode);
+                  setActivePhonePanel(null);
+                }}
+                className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md border border-slate-200 transition-colors"
+              >
+                {isPhoneMode ? 'Browser Mode' : 'Phone Mode'}
+              </button>
              <button onClick={loadDemoData} className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-purple-700 bg-purple-50 hover:bg-purple-100 rounded-md border border-purple-200 transition-colors">
                 <Zap size={16} /> Load Demo
             </button>
@@ -1664,278 +2061,83 @@ const PalletOptimizer = () => {
         </div>
       </header>
 
-      <main className="flex-1 flex overflow-hidden">
-        <div className="w-80 bg-white border-r flex flex-col">
-            <div className="p-2 border-b bg-gray-50 flex gap-2 text-xs font-semibold">
-                <button
-                  onClick={() => setSidebarTab('controls')}
-                  className={`flex-1 px-3 py-1 rounded ${sidebarTab === 'controls' ? 'bg-white border text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
-                >
-                  Controls
-                </button>
-                <button
-                  onClick={() => setSidebarTab('terminal')}
-                  className={`flex-1 px-3 py-1 rounded ${sidebarTab === 'terminal' ? 'bg-white border text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
-                >
-                  Terminal
-                </button>
-            </div>
-            {sidebarTab === 'controls' ? (
-            <div className="flex-1 flex flex-col overflow-y-auto">
-            {/* CONFIG */}
-            <div className="p-4 border-b space-y-4">
-                <h2 className="text-xs font-bold text-gray-400 uppercase tracking-wider flex items-center gap-2"><Settings size={12}/> Pallet Configuration</h2>
-                
-                <div className="grid grid-cols-2 gap-3">
-                    <div>
-                        <label className="text-xs font-medium text-gray-600">Pallet Len (in)</label>
-                        <input type="number" value={config.palletLength} onChange={e => setConfig({...config, palletLength: Number(e.target.value)})} className="w-full mt-1 px-2 py-1 text-sm border rounded focus:ring-2 focus:ring-blue-500 outline-none" />
-                    </div>
-                    <div>
-                        <label className="text-xs font-medium text-gray-600">Pallet Wid (in)</label>
-                        <input type="number" value={config.palletWidth} onChange={e => setConfig({...config, palletWidth: Number(e.target.value)})} className="w-full mt-1 px-2 py-1 text-sm border rounded focus:ring-2 focus:ring-blue-500 outline-none" />
-                    </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                    <div>
-                        <label className="text-xs font-medium text-gray-600 flex items-center gap-1"><ArrowUp size={10}/> Max Height</label>
-                        <input type="number" value={config.maxHeight} onChange={e => setConfig({...config, maxHeight: Number(e.target.value)})} className="w-full mt-1 px-2 py-1 text-sm border rounded focus:ring-2 focus:ring-blue-500 outline-none" />
-                    </div>
-                    <div>
-                        <label className="text-xs font-medium text-gray-600 flex items-center gap-1"><Scale size={10}/> Max Lbs</label>
-                        <input type="number" value={config.maxWeight} onChange={e => setConfig({...config, maxWeight: Number(e.target.value)})} className="w-full mt-1 px-2 py-1 text-sm border rounded focus:ring-2 focus:ring-blue-500 outline-none" />
-                    </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                    <div>
-                         <label className="text-xs font-medium text-gray-600 flex items-center gap-1"><ShieldAlert size={10}/> Safety Gap</label>
-                         <input type="number" step="0.5" value={config.safetyGap} onChange={e => setConfig({...config, safetyGap: Number(e.target.value)})} className="w-full mt-1 px-2 py-1 text-sm border rounded focus:ring-2 focus:ring-blue-500 outline-none" />
-                    </div>
-                    <div>
-                        <label className="text-xs font-medium text-gray-600">Post Spacing</label>
-                        <input type="number" value={config.framingSpacing} onChange={e => setConfig({...config, framingSpacing: Number(e.target.value)})} className="w-full mt-1 px-2 py-1 text-sm border rounded focus:ring-2 focus:ring-blue-500 outline-none" />
-                    </div>
-                </div>
-
-                <div>
-                    <label className="text-xs font-medium text-gray-600 flex items-center gap-1">Diagonal Bracing</label>
-                    <select 
-                        value={config.addBracing} 
-                        onChange={e => setConfig({...config, addBracing: e.target.value === 'true'})}
-                        className="w-full mt-1 px-2 py-1 text-sm border rounded focus:ring-2 focus:ring-blue-500 outline-none"
-                    >
-                        <option value="true">Yes - Add Structural Cross-Bracing</option>
-                        <option value="false">No - Vertical Posts Only</option>
-                    </select>
-                </div>
-                <div>
-                    <label className="text-xs font-medium text-gray-600 flex items-center gap-1">Vertical Stacking</label>
-                    <select 
-                        value={config.allowVertical} 
-                        onChange={e => setConfig({...config, allowVertical: e.target.value === 'true'})}
-                        className="w-full mt-1 px-2 py-1 text-sm border rounded focus:ring-2 focus:ring-blue-500 outline-none"
-                    >
-                        <option value="true">Auto - Stand Short Items</option>
-                        <option value="false">No - Always Lay Flat</option>
-                    </select>
-                </div>
-                {isConfigDirty && (
-                  <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-900">
-                    Config changed. Click Refresh Preview to recalculate the stack.
-                  </div>
-                )}
-            </div>
-
-            {/* STL INPUT */}
-            <div className="p-4 border-b bg-gray-50 space-y-3">
-                <h2 className="text-xs font-bold text-gray-400 uppercase tracking-wider">STL Input</h2>
-                <label className="flex flex-col items-center justify-center w-full h-20 border-2 border-gray-300 border-dashed rounded-lg cursor-pointer bg-white hover:bg-gray-50 transition-colors">
-                    <div className="flex flex-col items-center justify-center pt-2 pb-2">
-                        <Upload size={20} className="text-gray-400 mb-1" />
-                        <p className="text-[10px] text-gray-500">Select STL Folder</p>
-                    </div>
-                    <input type="file" className="hidden" accept=".stl" multiple webkitdirectory="true" directory="true" onChange={loadSTLFolder} />
-                </label>
-                <div className="text-[10px] text-gray-500">
-                    {stlFilesAvailable
-                      ? `Loaded ${stlLoadStatus.loaded} / ${stlLoadStatus.total} queued STLs`
-                      : 'No STL folder selected (CSV-only mode).'}
-                </div>
-                <label className="flex items-center gap-2 text-xs text-gray-600">
-                  <input
-                    type="checkbox"
-                    checked={useStlForCollisions}
-                    onChange={e => setUseStlForCollisions(e.target.checked)}
-                  />
-                  Use STL geometry for collision checks (slower)
-                </label>
-                {stlFilesAvailable && stlLoadStatus.missing.length > 0 && (
-                  <div className="text-[10px] text-amber-700">
-                    Missing: {stlLoadStatus.missing.join(', ')}
-                  </div>
-                )}
-            </div>
-
-            {/* BOM UPLOAD */}
-            <div className="p-4 border-b bg-white space-y-3">
-                <h2 className="text-xs font-bold text-gray-400 uppercase tracking-wider">BOM Upload</h2>
-                <label className="flex flex-col items-center justify-center w-full h-20 border-2 border-gray-300 border-dashed rounded-lg cursor-pointer bg-white hover:bg-gray-50 transition-colors">
-                    <div className="flex flex-col items-center justify-center pt-2 pb-2">
-                        <Upload size={20} className="text-gray-400 mb-1" />
-                        <p className="text-[10px] text-gray-500">Upload CSV (number, weight, qty; H/W/L optional if STL provided)</p>
-                    </div>
-                    <input type="file" className="hidden" accept=".csv" onChange={handleFileUpload} />
-                </label>
-                {bomItems.length > 0 && (
-                  <div className="space-y-1 text-[10px] text-gray-600">
-                    {bomItems.map((item, idx) => {
-                      const csvDimsOk = hasValidCsvDims(item);
-                      const stlMissing = stlFilesAvailable && (missingStlSet.has(item.stlKey) || !item.stlFound);
-                      let statusText = 'CSV dims';
-                      let statusClass = 'bg-slate-100 text-slate-600';
-                      if (!csvDimsOk) {
-                        statusText = stlMissing ? 'Missing STL' : 'STL required';
-                        statusClass = stlMissing ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700';
-                      } else if (stlFilesAvailable && item.stlFound && shouldUseStlGeometry) {
-                        statusText = 'STL ready';
-                        statusClass = 'bg-emerald-100 text-emerald-700';
-                      }
-                      return (
-                        <div key={idx} className="flex justify-between items-center bg-gray-50 border rounded px-2 py-1">
-                          <span>{item.itemNumber}</span>
-                          <span className="text-gray-400">x{item.qty}</span>
-                          <span className={`px-2 py-0.5 rounded ${statusClass}`}>
-                            {statusText}
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-            </div>
-
-            {/* UNITS */}
-            <div className="p-4 border-b bg-gray-50 space-y-2">
-                <h2 className="text-xs font-bold text-gray-400 uppercase tracking-wider">Units</h2>
-                <label className="text-xs font-medium text-gray-600">STL Units</label>
-                <select
-                  value={stlUnits}
-                  onChange={e => setStlUnits(e.target.value)}
-                  className="w-full mt-1 px-2 py-1 text-sm border rounded focus:ring-2 focus:ring-blue-500 outline-none"
-                >
-                  <option value="in">inches</option>
-                  <option value="mm">mm</option>
-                </select>
-                <label className="flex items-start gap-2 text-xs text-gray-600">
-                  <input
-                    type="checkbox"
-                    className="mt-0.5"
-                    checked={normalizeStlToBOM}
-                    onChange={e => setNormalizeStlToBOM(e.target.checked)}
-                  />
-                  <span>Override STL dimensions with CSV values (debug only).</span>
-                </label>
-            </div>
-
-            {/* DISPLAY */}
-            <div className="p-4 border-b bg-white space-y-2">
-                <h2 className="text-xs font-bold text-gray-400 uppercase tracking-wider">Display</h2>
-                <label className="flex items-center gap-2 text-xs text-gray-600">
-                  <input type="checkbox" checked={renderStlMeshes} onChange={e => setRenderStlMeshes(e.target.checked)} />
-                  Render STL meshes (loads geometry)
-                </label>
-                <label className="flex items-center gap-2 text-xs text-gray-600">
-                  <input type="checkbox" checked={renderProxyBoxes} onChange={e => setRenderProxyBoxes(e.target.checked)} />
-                  Render proxy boxes only
-                </label>
-                <label className="flex items-center gap-2 text-xs text-gray-600">
-                  <input type="checkbox" checked={showStlBounds} onChange={e => setShowStlBounds(e.target.checked)} />
-                  Show STL bounding boxes
-                </label>
-                <label className="flex items-center gap-2 text-xs text-gray-600">
-                  <input type="checkbox" checked={showPlacementBoxes} onChange={e => setShowPlacementBoxes(e.target.checked)} />
-                  Show placement boxes
-                </label>
-                <label className="flex items-center gap-2 text-xs text-gray-600">
-                  <input type="checkbox" checked={showDeadzoneBox} onChange={e => setShowDeadzoneBox(e.target.checked)} />
-                  Show deadzone box (largest open volume)
-                </label>
-                <label className="flex items-center gap-2 text-xs text-gray-600">
-                  <input type="checkbox" checked={showVoxelDebug} onChange={e => setShowVoxelDebug(e.target.checked)} />
-                  Debug: show voxel cubes
-                </label>
-            </div>
-
-            {/* ERROR */}
-            {errors.length > 0 && (
-                <div className="p-4 bg-red-50 border-b border-red-100">
-                    <div className="text-xs text-red-600 font-medium mb-1">Errors</div>
-                    <ul className="list-disc list-inside text-[10px] text-red-500">
-                        {errors.map((e,i) => <li key={i}>{e}</li>)}
-                    </ul>
-                </div>
-            )}
-
-            {/* ITEMS */}
-            <div className="flex-1 p-4 overflow-y-auto">
-                <h2 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Manifest</h2>
-                <div className="space-y-2">
-                    {Array.from(new Set(items.map(i => i.itemNumber))).map((num, i) => {
-                        const group = items.filter(x => x.itemNumber === num);
-                        return (
-                            <div key={i} className="bg-white border rounded p-2 text-xs shadow-sm flex justify-between items-center">
-                                <span className="font-bold">{num}</span>
-                                <span className="bg-gray-100 px-2 py-0.5 rounded text-gray-500">x{group.length}</span>
-                            </div>
-                        )
-                    })}
-                </div>
-            </div>
-            </div>
-            ) : (
-            <div className="flex-1 flex flex-col bg-slate-900 text-slate-100">
-                <div className="p-3 border-b border-slate-800 flex items-center justify-between">
-                    <div className="text-xs font-bold uppercase tracking-wider text-slate-300">Debug Terminal</div>
-                    <button
-                      onClick={() => setDebugLogs([])}
-                      className="text-[10px] text-slate-400 hover:text-slate-200"
-                    >
-                      Clear
-                    </button>
-                </div>
-                <div className="flex-1 overflow-y-auto px-3 py-2 font-mono text-[10px] space-y-1">
-                    {debugLogs.length === 0 ? (
-                      <div className="text-slate-500">No debug messages yet.</div>
-                    ) : (
-                      debugLogs.map(log => {
-                        const levelClass = log.level === 'error'
-                          ? 'text-red-300'
-                          : log.level === 'warn'
-                            ? 'text-amber-300'
-                            : 'text-slate-200';
-                        return (
-                          <div key={log.id} className="flex gap-2">
-                            <span className="text-slate-500">{log.timestamp}</span>
-                            <span className={`uppercase ${levelClass}`}>{log.level}</span>
-                            <span className={levelClass}>{log.message}</span>
-                          </div>
-                        );
-                      })
-                    )}
-                </div>
-            </div>
-            )}
-        </div>
+      <main className={`flex-1 flex ${isPhoneMode ? 'flex-col' : ''} overflow-hidden`}>
+        {!isPhoneMode && (
+          <div className="w-80 bg-white border-r flex flex-col">
+              <div className="p-2 border-b bg-gray-50 flex gap-2 text-xs font-semibold">
+                  <button
+                    onClick={() => setSidebarTab('controls')}
+                    className={`flex-1 px-3 py-1 rounded ${sidebarTab === 'controls' ? 'bg-white border text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                  >
+                    Controls
+                  </button>
+                  <button
+                    onClick={() => setSidebarTab('terminal')}
+                    className={`flex-1 px-3 py-1 rounded ${sidebarTab === 'terminal' ? 'bg-white border text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                  >
+                    Terminal
+                  </button>
+              </div>
+              {sidebarTab === 'controls' ? (
+              <div className="flex-1 flex flex-col overflow-y-auto">
+                {configSection}
+                {stlSection}
+                {bomSection}
+                {unitsSection}
+                {displaySection}
+                {errorsSection}
+                {manifestSection}
+              </div>
+              ) : (
+                terminalSection
+              )}
+          </div>
+        )}
 
         {/* CANVAS */}
-        <div className="flex-1 flex flex-col bg-gray-200 relative">
+        <div
+          className={`flex-1 flex flex-col bg-gray-200 relative ${isPhoneMode ? 'min-h-0' : ''}`}
+          onClick={() => {
+            if (isPhoneMode && activePhonePanel) {
+              setActivePhonePanel(null);
+            }
+          }}
+        >
+            {isPhoneMode && (
+              <div className="absolute top-4 left-4 right-4 z-20 flex flex-col gap-3" onClick={(e) => e.stopPropagation()}>
+                <div className="flex flex-wrap items-center gap-2 rounded-full bg-white/80 backdrop-blur border border-white/60 shadow-lg px-2 py-2">
+                  {[
+                    { key: 'config', label: 'Config' },
+                    { key: 'inputs', label: 'Inputs' },
+                    { key: 'display', label: 'Display' },
+                    { key: 'manifest', label: 'Manifest' },
+                    { key: 'terminal', label: 'Terminal' }
+                  ].map(tab => (
+                    <button
+                      key={tab.key}
+                      onClick={() => setActivePhonePanel(activePhonePanel === tab.key ? null : tab.key)}
+                      className={`px-3 py-1 rounded-full text-xs font-semibold transition-colors ${
+                        activePhonePanel === tab.key
+                          ? 'bg-slate-900 text-white'
+                          : 'bg-white/70 text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
+                {activePhonePanel && (
+                  <div className="max-h-[60vh] overflow-y-auto rounded-2xl border border-white/60 bg-white/80 backdrop-blur shadow-xl p-3">
+                    {phonePanels[activePhonePanel]}
+                  </div>
+                )}
+              </div>
+            )}
             <div ref={mountRef} className="flex-1 w-full h-full cursor-move" />
 
             {/* PALLET CONTROLS */}
             {pallets.length > 0 && (
-                <div className="absolute bottom-6 left-1/2 -translate-x-1/2 bg-white rounded-full shadow-lg border px-6 py-3 flex items-center gap-6">
+                <div className="absolute bottom-6 left-1/2 -translate-x-1/2 bg-white/90 backdrop-blur rounded-full shadow-lg border border-white/60 px-6 py-3 flex items-center gap-6">
                     <button 
                         onClick={() => setCurrentPalletView(Math.max(0, currentPalletView - 1))}
                         disabled={currentPalletView===0}
@@ -1955,10 +2157,42 @@ const PalletOptimizer = () => {
                     </button>
                 </div>
             )}
+
+            {pallets.length > 0 && (
+              <div className={`absolute ${isPhoneMode ? 'bottom-24 right-4' : 'bottom-6 right-6'} bg-white/85 backdrop-blur rounded-2xl shadow-lg border border-white/60 px-3 py-2 flex items-center gap-2 text-xs`}>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    rotateCameraBy(-Math.PI / 8);
+                  }}
+                  className="px-2 py-1 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700"
+                >
+                  Rotate ◀
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    rotateCameraBy(Math.PI / 8);
+                  }}
+                  className="px-2 py-1 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700"
+                >
+                  Rotate ▶
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setIsAutoRotate(!isAutoRotate);
+                  }}
+                  className={`px-2 py-1 rounded-md ${isAutoRotate ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}`}
+                >
+                  {isAutoRotate ? 'Auto On' : 'Auto Off'}
+                </button>
+              </div>
+            )}
             
             {/* STATS PANEL */}
             {pallets.length > 0 && (
-                <div className="absolute top-4 right-4 bg-white/95 backdrop-blur rounded-lg shadow-md border p-4 w-64">
+                <div className={`absolute ${isPhoneMode ? 'top-4 left-4 right-4 w-auto' : 'top-4 right-4 w-64'} bg-white/85 backdrop-blur rounded-2xl shadow-md border border-white/60 p-4`}>
                     <h3 className="text-xs font-bold text-gray-400 uppercase mb-3 border-b pb-1">Bill of Materials</h3>
                     <div className="space-y-3 text-sm">
                         <div className="flex justify-between items-center">
