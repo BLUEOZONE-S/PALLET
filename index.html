@@ -1,3 +1,23 @@
+<!--
+POLICY COMPLIANCE REVIEW (Vortex Internal Tooling)
+File: index.html
+Reviewed: 2025-09-27
+Reviewer: Codex
+
+Compliant:
+- [ ] Local-only file handling for CSV/STL uploads; no network transmission in app logic. Location: handleFileUpload(), loadSTLFolder()
+- [ ] Client-side processing only (no auth or API tokens required).
+
+Non-compliant:
+- [ ] External Google Fonts request without approval or local hosting. (Risk: external data disclosure via IP/referrer)  Location: <style>@import url('https://fonts.googleapis.com/...')  Fix: self-host font or remove external import.
+
+Needs review:
+- [ ] Debug log panel may expose item metadata on shared screens; decide retention/visibility policy. (Decision: should logs be hidden/cleared by default?)
+
+Notes / Actions:
+- Add approved font hosting or replace with system font stack.
+- Consider adding a "clear logs" control and/or disabling debug logs by default in production builds.
+-->
 <!DOCTYPE html>
 <html lang="en">
 <head>
